@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+data/*.db
+data/*.db-*
+data/browser_profiles/
+data/llm_settings.json
+data/llm_settings.tmp
+storage/uploads/*
+!storage/uploads/.gitkeep

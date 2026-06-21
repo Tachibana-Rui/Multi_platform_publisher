@@ -1,0 +1,2 @@
+"""Content Hub application package."""
+

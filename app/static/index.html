@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="本地优先的多平台内容中台">
+  <title>Content Hub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Content Hub 首页">
+        <span class="brand-mark"><span></span><span></span><span></span></span>
+        <span><strong>Content</strong><em>Hub</em></span>
+      </a>
+
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-item active" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>
+          内容总览
+        </button>
+        <button class="nav-item" type="button" disabled title="下一阶段开放">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Zm7 12 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></svg>
+          平台适配
+          <span class="soon">Soon</span>
+        </button>
+        <button class="nav-item" type="button" disabled title="下一阶段开放">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg>
+          发布队列
+          <span class="soon">Soon</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-note">
+        <span class="pulse-dot"></span>
+        <div><strong>本地模式</strong><small>所有数据保存在此设备</small></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">CONTENT WORKSPACE</p>
+          <h1>内容总览</h1>
+        </div>
+        <div class="top-actions">
+          <button class="import-button" id="storageSettingsButton" type="button">
+            <span>▣</span> 存储设置
+          </button>
+          <button class="import-button" id="accountManagerButton" type="button">
+            <span>◎</span> 账号管理
+          </button>
+          <button class="import-button" id="aiConfigButton" type="button">
+            <span>⚙</span> AI 配置
+          </button>
+          <button class="import-button" id="libraryButton" type="button">
+            <span>⌕</span> 素材检索
+          </button>
+          <button class="import-button" id="importLinkButton" type="button">
+            <span>↙</span> 链接导入
+          </button>
+          <button class="primary-button" id="newPostButton" type="button">
+            <span>＋</span> 新建内容
+          </button>
+        </div>
+      </header>
+
+      <section class="stats-grid" aria-label="内容统计">
+        <article class="stat-card stat-featured">
+          <div class="stat-label"><span class="stat-icon">◫</span>内容总数</div>
+          <strong id="totalPosts">—</strong>
+          <small>统一管理原创内容</small>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label"><span class="dot amber"></span>草稿</div>
+          <strong id="draftPosts">—</strong>
+          <small>继续打磨你的灵感</small>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label"><span class="dot green"></span>就绪</div>
+          <strong id="readyPosts">—</strong>
+          <small>等待进入平台适配</small>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label"><span class="stat-icon">◇</span>素材库</div>
+          <strong id="assetCount">—</strong>
+          <small id="assetSize">—</small>
+        </article>
+      </section>
+
+      <section class="content-section">
+        <div class="section-heading">
+          <div><h2>我的内容</h2><p id="resultSummary">正在载入内容…</p></div>
+          <div class="view-switch" aria-label="视图切换">
+            <button class="active" data-view="grid" title="卡片视图" type="button">▦</button>
+            <button data-view="list" title="列表视图" type="button">☷</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <label class="search-box">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+            <input id="searchInput" type="search" placeholder="搜索标题或正文…" autocomplete="off">
+          </label>
+          <select id="statusFilter" aria-label="按状态筛选">
+            <option value="">全部状态</option>
+            <option value="draft">草稿</option>
+            <option value="ready">就绪</option>
+            <option value="archived">已归档</option>
+          </select>
+          <select id="typeFilter" aria-label="按内容类型筛选">
+            <option value="">全部类型</option>
+            <option value="image">单图</option>
+            <option value="gallery">图集</option>
+            <option value="video">视频</option>
+          </select>
+        </div>
+
+        <div class="post-grid" id="postGrid" aria-live="polite"></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="aiConfigModal" hidden>
+    <section class="modal config-modal" role="dialog" aria-modal="true" aria-labelledby="aiConfigTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">MODEL PROVIDER</p><h2 id="aiConfigTitle">豆包模型配置</h2></div>
+        <button class="icon-button" id="closeAiConfigButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <form id="aiConfigForm">
+        <div class="config-body">
+          <div class="provider-banner">
+            <span class="doubao-mark">豆包</span>
+            <div><strong>火山方舟 · Chat Completions</strong><small>配置仅保存在当前 Windows 用户的本机环境</small></div>
+            <span class="config-state" id="apiKeyState">未配置</span>
+          </div>
+          <label class="field">
+            <span>API Key</span>
+            <input id="doubaoApiKey" type="password" autocomplete="new-password" placeholder="输入新的 API Key">
+            <small class="field-help" id="apiKeyHint">保存后密钥将由 Windows 加密。</small>
+          </label>
+          <label class="field">
+            <span>模型或推理接入点 ID</span>
+            <input id="doubaoModel" value="doubao-seed-2-0-lite-260428" placeholder="doubao-seed-2-0-lite-260428 或 ep-...">
+          </label>
+          <label class="field">
+            <span>API 地址</span>
+            <input id="doubaoBaseUrl" value="https://ark.cn-beijing.volces.com/api/v3" readonly>
+          </label>
+          <div class="import-note"><span>i</span><p>API Key 不会发送到浏览器日志，也不会通过读取接口返回。更换 Key 时直接输入并保存；留空则保留现有 Key。</p></div>
+        </div>
+        <footer class="modal-footer">
+          <button class="danger-link" id="clearApiKeyButton" type="button">清除 API Key</button>
+          <div class="footer-actions">
+            <button class="secondary-button" id="cancelAiConfigButton" type="button">取消</button>
+            <button class="primary-button" id="saveAiConfigButton" type="submit">保存配置</button>
+          </div>
+        </footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="accountModal" hidden>
+    <section class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">PLATFORM ACCOUNTS</p><h2 id="accountModalTitle">账号管理</h2></div>
+        <button class="icon-button" id="closeAccountButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="account-body">
+        <p class="account-intro">登录状态保存在 Content Hub 专用浏览器中。点击平台按钮后，请在弹出的网页完成扫码或登录。</p>
+        <div class="account-grid" id="accountGrid"></div>
+      </div>
+      <footer class="modal-footer">
+        <small class="account-footer-note">不会读取密码、导出 Cookie 或绕过验证码</small>
+        <div class="footer-actions">
+          <button class="secondary-button" id="refreshAccountsButton" type="button">重新检测</button>
+          <button class="primary-button" id="doneAccountButton" type="button">完成</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="storageModal" hidden>
+    <section class="modal config-modal" role="dialog" aria-modal="true" aria-labelledby="storageModalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">ASSET STORAGE</p><h2 id="storageModalTitle">素材存储设置</h2></div>
+        <button class="icon-button" id="closeStorageButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="config-body">
+        <div class="provider-banner storage-banner">
+          <span class="storage-mark">▣</span>
+          <div><strong>图片与视频存储目录</strong><small id="storageStats">正在读取当前目录…</small></div>
+        </div>
+        <label class="field">
+          <span>目录路径</span>
+          <div class="path-picker-row">
+            <input id="storagePath" maxlength="2000" placeholder="选择用于保存素材的文件夹">
+            <button class="secondary-button" id="pickStorageButton" type="button">选择目录</button>
+          </div>
+          <small class="field-help">保存时会先把现有素材复制到新目录，确认完整后才切换；旧目录保留作为备份。</small>
+        </label>
+        <div class="import-note"><span>i</span><p>发布任务运行期间不能切换目录。新旧目录不能互相嵌套。</p></div>
+      </div>
+      <footer class="modal-footer">
+        <div></div>
+        <div class="footer-actions">
+          <button class="secondary-button" id="cancelStorageButton" type="button">取消</button>
+          <button class="primary-button" id="saveStorageButton" type="button">迁移并保存</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="platformModal" hidden>
+    <section class="modal platform-modal" role="dialog" aria-modal="true" aria-labelledby="platformModalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">PLATFORM DRAFT</p><h2 id="platformModalTitle">平台发布窗口</h2></div>
+        <button class="icon-button" id="closePlatformButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="platform-body">
+        <section class="platform-copy-editor">
+          <div class="platform-fields-scroll">
+            <div class="adapter-toolbar">
+            <label><span>目标平台</span>
+              <select id="targetPlatform">
+                <option value="douyin">抖音</option>
+                <option value="xiaohongshu">小红书</option>
+                <option value="bilibili">B站</option>
+              </select>
+            </label>
+            <label><span>谁可以看</span>
+              <select id="publicationVisibility">
+                <option value="public">公开可见</option>
+                <option value="friends">仅互关好友可见</option>
+                <option value="private">仅自己可见</option>
+              </select>
+            </label>
+            <span class="copy-source" id="copySourceBadge">原文复制</span>
+            </div>
+            <label class="field">
+            <span>平台标题</span>
+            <input id="platformTitle" maxlength="300" placeholder="标题为空时可调用豆包生成">
+            </label>
+            <label class="field copy-body-field">
+            <span>平台正文</span>
+            <textarea id="platformBody" rows="9" maxlength="100000" placeholder="正文为空时可调用豆包生成"></textarea>
+            </label>
+            <label class="field prompt-field">
+            <span>本次生成 Prompt</span>
+            <textarea id="generationPrompt" rows="3" maxlength="4000"></textarea>
+            <small class="field-help">可以直接修改。每次点击生成都会得到一个新版本。</small>
+            </label>
+          </div>
+          <div class="generation-row">
+            <div class="llm-readiness" id="llmReadiness"><span></span><p>正在检查豆包配置…</p></div>
+            <button class="generate-button" id="generateCopyButton" type="button">✦ 一键生成</button>
+          </div>
+        </section>
+        <aside class="platform-assets-panel">
+          <div class="platform-assets-heading"><div><strong>选择发布素材</strong><small id="selectedImageCount">已选择 0 个</small></div><span>前 4 张图片供 LLM 理解</span></div>
+          <div class="platform-assets-grid" id="platformAssetsGrid"></div>
+          <section class="publication-panel" id="publicationPanel">
+            <div class="publication-empty">保存草稿后，可由发布 Agent 打开平台创作中心并自动填写。</div>
+          </section>
+        </aside>
+      </div>
+      <footer class="modal-footer">
+        <div class="version-meta" id="versionMeta">尚未调用 LLM</div>
+        <div class="footer-actions">
+          <button class="secondary-button" id="cancelPlatformButton" type="button">关闭</button>
+          <button class="primary-button" id="savePlatformButton" type="button">保存发布草稿</button>
+          <button class="publish-agent-button" id="preparePublishButton" type="button">准备发布</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="libraryModal" hidden>
+    <section class="modal library-modal" role="dialog" aria-modal="true" aria-labelledby="libraryModalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">ORIGINAL LIBRARY</p><h2 id="libraryModalTitle">原始素材库</h2></div>
+        <button class="icon-button" id="closeLibraryButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="library-body">
+        <section class="root-section">
+          <div class="library-section-title"><div><strong>素材根目录</strong><small>扫描过程只读取文件，不会修改原始素材</small></div></div>
+          <button class="folder-picker-button" id="pickRootButton" type="button">
+            <span class="folder-picker-icon">＋</span>
+            <span><strong>选择并添加目录</strong><small>打开 Windows 文件夹选择器</small></span>
+          </button>
+          <div class="root-list" id="rootList"></div>
+        </section>
+        <section class="library-search-section">
+          <div class="library-section-title">
+            <div><strong>结构化检索</strong><small>目录格式：CoserName + CharacterName + YYYYMMDD</small></div>
+          </div>
+          <form class="library-filters" id="librarySearchForm">
+            <input id="libraryCoserFilter" placeholder="Coser 名称">
+            <input id="libraryCharacterFilter" placeholder="角色名称">
+            <input id="libraryDateFilter" type="date" aria-label="拍摄日期">
+            <button class="primary-button" type="submit">检索</button>
+          </form>
+          <div class="library-results" id="libraryResults">
+            <div class="library-empty">添加素材根目录并完成扫描后，即可按结构化字段检索。</div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="importModal" hidden>
+    <section class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">LINK IMPORT</p><h2 id="importModalTitle">导入小红书作品</h2></div>
+        <button class="icon-button" id="closeImportButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <form id="importForm">
+        <div class="import-body">
+          <div class="import-platform">
+            <span class="xhs-mark">小红书</span>
+            <div><strong>公开作品链接</strong><small>自动提取文案、标签、图片与视频</small></div>
+          </div>
+          <label class="field">
+            <span>作品链接 <b>*</b></span>
+            <textarea id="importUrl" rows="3" required placeholder="粘贴小红书分享链接或包含链接的分享文本…"></textarea>
+          </label>
+          <label class="rights-check">
+            <input id="confirmRights" type="checkbox" required>
+            <span>我确认该作品由本人原创，或已获得内容所有者的导入与使用授权。</span>
+          </label>
+          <div class="import-note">
+            <span>i</span>
+            <p>仅支持公开可访问的作品。导入期间请保持窗口开启；每个作品的媒体会保存到独立文件夹。</p>
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <div></div>
+          <div class="footer-actions">
+            <button class="secondary-button" id="cancelImportButton" type="button">取消</button>
+            <button class="primary-button" id="startImportButton" type="submit">解析并导入</button>
+          </div>
+        </footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="editorModal" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">CONTENT EDITOR</p><h2 id="modalTitle">新建内容</h2></div>
+        <button class="icon-button" id="closeModalButton" type="button" aria-label="关闭">×</button>
+      </header>
+
+      <form id="postForm">
+        <div class="modal-body">
+          <div class="form-main">
+            <label class="field">
+              <span>标题</span>
+              <input id="titleInput" name="title" maxlength="200" placeholder="可以留空，稍后由 LLM 生成平台标题">
+            </label>
+            <label class="field">
+              <span>正文</span>
+              <textarea id="bodyInput" name="body" rows="8" maxlength="100000" placeholder="写下原始正文、创作想法或内容提纲…"></textarea>
+              <small class="char-count"><span id="bodyCount">0</span> 字</small>
+            </label>
+            <label class="field">
+              <span>标签</span>
+              <input id="tagsInput" name="tags" placeholder="旅行, 摄影, 周末（逗号分隔）">
+            </label>
+
+            <div class="field">
+              <span>图片与视频</span>
+              <label class="dropzone" id="dropzone">
+                <input id="fileInput" type="file" accept="image/*,video/*" multiple hidden>
+                <span class="upload-icon">⇧</span>
+                <strong>拖放素材到这里，或点击选择</strong>
+                <small>支持 JPG、PNG、WebP、MP4、MOV 等常见格式</small>
+              </label>
+              <div class="asset-preview-list" id="assetPreviewList"></div>
+              <div class="match-actions" id="matchActions" hidden>
+                <div><strong>高清原图匹配</strong><small>根据标签定位角色目录，再验证压缩图片</small></div>
+                <div class="match-action-buttons">
+                  <button class="secondary-button" id="matchOriginalButton" type="button">开始匹配</button>
+                  <button class="secondary-button manual-match-button" id="manualMatchButton" type="button" hidden>指定原图文件夹</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="form-side">
+            <label class="field">
+              <span>内容状态</span>
+              <select id="postStatus" name="status">
+                <option value="draft">草稿</option>
+                <option value="ready">就绪</option>
+                <option value="archived">归档</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>来源</span>
+              <select id="sourcePlatform" name="source_platform">
+                <option value="manual">手动创建</option>
+                <option value="xiaohongshu">小红书</option>
+                <option value="douyin">抖音</option>
+                <option value="notion">Notion</option>
+                <option value="local">本地文件</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>来源链接</span>
+              <input id="sourceUrl" name="source_url" type="url" placeholder="https://…">
+            </label>
+            <button class="platform-launch-button" id="openPlatformButton" type="button" hidden>
+              <span>✦</span><div><strong>平台发布窗口</strong><small>选择图片、生成并编辑平台文案</small></div><b>→</b>
+            </button>
+            <div class="editor-tip">
+              <span>✦</span>
+              <p><strong>保留原始内容</strong>平台适配版本将在后续阶段独立生成，不会覆盖这里的原稿。</p>
+            </div>
+          </aside>
+        </div>
+
+        <footer class="modal-footer">
+          <button class="danger-link" id="deletePostButton" type="button" hidden>删除内容</button>
+          <div class="footer-actions">
+            <button class="secondary-button" id="cancelButton" type="button">取消</button>
+            <button class="primary-button" id="saveButton" type="submit">保存内容</button>
+          </div>
+        </footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
