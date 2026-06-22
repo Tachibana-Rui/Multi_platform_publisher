@@ -68,7 +68,7 @@ def _download_douyin(
     post_id: str,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> tuple[str, ParsedDouyinPost, list[dict]]:
-    target_dir = settings.upload_dir / post_id
+    target_dir = settings.upload_dir / post_id / "downloads"
     target_dir.mkdir(parents=True, exist_ok=False)
     profile_dir = settings.browser_profile_dir / "douyin"
     def report_progress(data: dict) -> None:
@@ -94,6 +94,14 @@ def _download_douyin(
     }
     if profile_dir.is_dir():
         options["cookiesfrombrowser"] = ("edge", str(profile_dir), None, None)
+
+    def cleanup_target() -> None:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        try:
+            target_dir.parent.rmdir()
+        except OSError:
+            pass
+
     try:
         with YoutubeDL(options) as downloader:
             info = downloader.extract_info(resolved_url, download=True)
@@ -140,7 +148,7 @@ def _download_douyin(
                 tags=tags[:30],
             ), [{
                 "original_name": path.name[:255],
-                "storage_name": f"{post_id}/{path.name}",
+                "storage_name": path.relative_to(settings.upload_dir).as_posix(),
                 "media_type": "video",
                 "mime_type": "video/mp4" if path.suffix.casefold() == ".mp4" else "video/webm",
                 "file_size": path.stat().st_size,
@@ -151,10 +159,10 @@ def _download_douyin(
                 "position": 0,
             }]
     except HTTPException:
-        shutil.rmtree(target_dir, ignore_errors=True)
+        cleanup_target()
         raise
     except (DownloadError, OSError, ValueError) as exc:
-        shutil.rmtree(target_dir, ignore_errors=True)
+        cleanup_target()
         message = str(exc).splitlines()[-1][:300]
         raise HTTPException(
             status_code=422,

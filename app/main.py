@@ -30,7 +30,7 @@ from .content_matcher import (
 )
 from .models import (
     AssetMatch, LibraryFolder, MediaAsset, OriginalAsset, PlatformPublication,
-    Post, SourceRoot, Tag,
+    PlatformVersion, Post, SourceRoot, Tag,
 )
 from .publish_agent import ACTIVE_STATUSES, publication_agent, serialize_publication
 from .doubao import generate_copy
@@ -68,11 +68,14 @@ from .storage_settings import get_storage_settings, update_storage_location
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    from .media_storage import migrate_media_layout
+    migrate_media_layout()
     publication_agent.recover_interrupted()
     yield
 
 
 app = FastAPI(title="Content Hub", version="0.4.1", lifespan=lifespan)
+PUBLISHABLE_PLATFORMS = {"douyin", "xiaohongshu", "bilibili"}
 
 
 def serialize_asset(asset: MediaAsset) -> dict:
@@ -602,6 +605,21 @@ def get_post(post_id: str, db: Session = Depends(get_db)) -> dict:
     return serialize_post(get_post_or_404(db, post_id))
 
 
+@app.get("/api/posts/{post_id}/platform-versions")
+def list_existing_platform_versions(
+    post_id: str,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    post = get_post_or_404(db, post_id)
+    versions = db.scalars(
+        select(PlatformVersion).where(
+            PlatformVersion.post_id == post_id,
+            PlatformVersion.platform.in_({"xiaohongshu", "douyin"}),
+        ).order_by(PlatformVersion.platform)
+    ).all()
+    return [serialize_version(version, post) for version in versions]
+
+
 @app.get("/api/posts/{post_id}/platform-versions/{platform}")
 def get_platform_version(post_id: str, platform: str, db: Session = Depends(get_db)) -> dict:
     post = get_post_or_404(db, post_id)
@@ -743,8 +761,9 @@ async def upload_assets(
         raise HTTPException(status_code=400, detail="每次最多上传 30 个文件")
     created_paths: list[Path] = []
     try:
-        for index, upload in enumerate(files, start=len(post.assets)):
-            details = await save_upload(upload, post_id)
+        next_position = max((asset.position for asset in post.assets), default=-1) + 1
+        for index, upload in enumerate(files, start=next_position):
+            details = await save_upload(upload, post_id, index)
             created_paths.append(settings.upload_dir / details["storage_name"])
             post.assets.append(MediaAsset(**details, position=index))
         if post.assets:
@@ -757,9 +776,8 @@ async def upload_assets(
         db.rollback()
         for path in created_paths:
             path.unlink(missing_ok=True)
-        post_dir = settings.upload_dir / post_id
-        if post_dir.is_dir() and not any(post_dir.iterdir()):
-            post_dir.rmdir()
+        from .media_storage import prune_empty_media_dirs
+        prune_empty_media_dirs(post_id)
         raise
 
 
@@ -777,9 +795,8 @@ def delete_asset(post_id: str, asset_id: str, db: Session = Depends(get_db)) -> 
     path.unlink(missing_ok=True)
     if copied_path:
         copied_path.unlink(missing_ok=True)
-    post_dir = settings.upload_dir / post_id
-    if post_dir.is_dir() and not any(post_dir.iterdir()):
-        post_dir.rmdir()
+    from .media_storage import prune_empty_media_dirs
+    prune_empty_media_dirs(post_id)
     db.refresh(post)
     return serialize_post(post)
 
@@ -819,6 +836,8 @@ def build_publication(
     platform: str,
     visibility: str,
 ) -> PlatformPublication:
+    if platform not in PUBLISHABLE_PLATFORMS:
+        raise HTTPException(status_code=422, detail="该平台已不支持创建发布任务")
     version = get_or_create_version(db, post, platform)
     asset_ids = selected_asset_ids(version)
     resolve_selected_assets(post, asset_ids)
@@ -885,19 +904,87 @@ def publication_time():
     return datetime.now(timezone.utc)
 
 
-@app.get("/api/publications/{publication_id}")
-def get_publication(publication_id: str, db: Session = Depends(get_db)) -> dict:
+def get_publication_or_404(db: Session, publication_id: str) -> PlatformPublication:
     publication = db.get(PlatformPublication, publication_id)
     if not publication:
         raise HTTPException(status_code=404, detail="发布任务不存在")
+    return publication
+
+
+def ensure_publication_record_editable(publication: PlatformPublication) -> None:
+    if publication.status in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="发布任务仍在运行，请先取消任务再修改记录")
+
+
+def append_publication_log(
+    publication: PlatformPublication,
+    status: str,
+    message: str,
+) -> None:
+    try:
+        logs = json.loads(publication.logs_json or "[]")
+    except (json.JSONDecodeError, TypeError):
+        logs = []
+    if not isinstance(logs, list):
+        logs = []
+    logs.append({"at": publication_time().isoformat(), "status": status, "message": message})
+    publication.logs_json = json.dumps(logs[-100:], ensure_ascii=False)
+
+
+@app.get("/api/publications/{publication_id}")
+def get_publication(publication_id: str, db: Session = Depends(get_db)) -> dict:
+    publication = get_publication_or_404(db, publication_id)
     return serialize_publication(publication)
+
+
+@app.post("/api/publications/{publication_id}/mark-published")
+def mark_publication_published(
+    publication_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    publication = get_publication_or_404(db, publication_id)
+    ensure_publication_record_editable(publication)
+    publication.status = "published"
+    publication.published_at = publication.published_at or publication_time()
+    publication.error_message = None
+    append_publication_log(publication, "published", "已由用户在 Content Hub 中标记为发布成功")
+    db.commit()
+    db.refresh(publication)
+    return serialize_publication(publication)
+
+
+@app.post("/api/publications/{publication_id}/mark-unpublished")
+def mark_publication_unpublished(
+    publication_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    publication = get_publication_or_404(db, publication_id)
+    ensure_publication_record_editable(publication)
+    publication.status = "unpublished"
+    publication.published_at = None
+    publication.platform_item_id = None
+    publication.platform_url = None
+    publication.error_message = None
+    append_publication_log(publication, "unpublished", "已由用户在 Content Hub 中标记为未发布")
+    db.commit()
+    db.refresh(publication)
+    return serialize_publication(publication)
+
+
+@app.delete("/api/publications/{publication_id}", status_code=204)
+def delete_publication_record(
+    publication_id: str,
+    db: Session = Depends(get_db),
+) -> None:
+    publication = get_publication_or_404(db, publication_id)
+    ensure_publication_record_editable(publication)
+    db.delete(publication)
+    db.commit()
 
 
 @app.post("/api/publications/{publication_id}/confirm")
 def confirm_publication(publication_id: str, db: Session = Depends(get_db)) -> dict:
-    publication = db.get(PlatformPublication, publication_id)
-    if not publication:
-        raise HTTPException(status_code=404, detail="发布任务不存在")
+    publication = get_publication_or_404(db, publication_id)
     if publication.status in {"published", "submitted"}:
         return {"accepted": True, "already_published": True, "publication_id": publication_id}
     if publication.status != "review_pending":
@@ -909,11 +996,11 @@ def confirm_publication(publication_id: str, db: Session = Depends(get_db)) -> d
 
 @app.post("/api/publications/{publication_id}/retry", status_code=202)
 def retry_publication(publication_id: str, db: Session = Depends(get_db)) -> dict:
-    publication = db.get(PlatformPublication, publication_id)
-    if not publication:
-        raise HTTPException(status_code=404, detail="发布任务不存在")
-    if publication.status not in {"failed", "cancelled"}:
-        raise HTTPException(status_code=409, detail="只有失败或已取消的任务可以重试")
+    publication = get_publication_or_404(db, publication_id)
+    if publication.platform not in PUBLISHABLE_PLATFORMS:
+        raise HTTPException(status_code=422, detail="该平台已不再支持发布；可以修正状态或删除历史记录")
+    if publication.status not in {"failed", "cancelled", "unpublished"}:
+        raise HTTPException(status_code=409, detail="只有失败、已取消或标记未发布的任务可以重试")
     publication.status = "pending"
     publication.error_message = None
     db.commit()
@@ -924,9 +1011,7 @@ def retry_publication(publication_id: str, db: Session = Depends(get_db)) -> dic
 
 @app.post("/api/publications/{publication_id}/cancel")
 def cancel_publication(publication_id: str, db: Session = Depends(get_db)) -> dict:
-    publication = db.get(PlatformPublication, publication_id)
-    if not publication:
-        raise HTTPException(status_code=404, detail="发布任务不存在")
+    publication = get_publication_or_404(db, publication_id)
     if publication.status not in ACTIVE_STATUSES and publication.status != "pending":
         raise HTTPException(status_code=409, detail="当前任务不能取消")
     if not publication_agent.cancel(publication_id):

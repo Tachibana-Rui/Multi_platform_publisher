@@ -18,7 +18,7 @@ PUBLISH_URLS = {
 }
 PLATFORM_BROWSER_LOCKS = {
     platform: threading.Lock()
-    for platform in ("douyin", "xiaohongshu", "bilibili", "wechat_moments")
+    for platform in ("douyin", "xiaohongshu", "bilibili")
 }
 VISIBILITY_LABELS = {
     "public": ("公开可见", "所有人可见", "公开"),
@@ -26,6 +26,25 @@ VISIBILITY_LABELS = {
     "private": ("仅自己可见", "私密", "仅我可见"),
 }
 VISIBILITY_NAMES = {"public": "公开可见", "friends": "仅互关好友可见", "private": "仅自己可见"}
+INTERACTIVE_TOKEN_PATTERN = re.compile(
+    r"(?<!\w)([#＃@＠][^\s#＃@＠,，。.!！?？;；:：]+)"
+)
+
+
+def split_interactive_tokens(body: str) -> tuple[list[str], list[str]]:
+    """Return unique hashtags and mentions without their marker."""
+    hashtags: list[str] = []
+    mentions: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_token in INTERACTIVE_TOKEN_PATTERN.findall(body):
+        marker = "#" if raw_token[0] in "#＃" else "@"
+        value = raw_token[1:].strip()
+        key = (marker, value.casefold())
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        (hashtags if marker == "#" else mentions).append(value)
+    return hashtags, mentions
 
 
 def _browser_executable() -> Path | None:
@@ -111,6 +130,7 @@ class BrowserPublisher(ABC):
             raise RuntimeError("未找到 Microsoft Edge 或 Google Chrome")
         profile_dir = settings.browser_profile_dir / self.platform
         profile_dir.mkdir(parents=True, exist_ok=True)
+        self._page_closed_event = threading.Event()
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -121,8 +141,10 @@ class BrowserPublisher(ABC):
                 accept_downloads=False,
                 args=["--start-maximized"],
             )
+            page = None
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                page.on("close", lambda: self._page_closed_event.set())
                 on_status("awaiting_login", f"请在打开的{self.display_name}窗口中完成登录")
                 page.goto(self.publish_url(snapshot), wait_until="domcontentloaded", timeout=90_000)
                 file_input = self._wait_for_file_input(page, snapshot, cancel_event)
@@ -139,12 +161,16 @@ class BrowserPublisher(ABC):
                     if visibility_applied
                     else f"未能自动确认“{visibility_name}”，请务必在平台窗口手动选择"
                 )
+                self._prepare_interactive_review(page, snapshot)
                 on_status(
                     "review_pending",
-                    f"{visibility_message}；请检查封面、分区等选项，然后回到 Content Hub 确认发布",
+                    self._review_message(snapshot, visibility_message),
                 )
                 review_url = page.url
-                last_content = (snapshot.title, snapshot.body)
+                last_content = self._read_metadata(page, snapshot) or (
+                    snapshot.title,
+                    self._body_for_prefill(snapshot),
+                )
                 while True:
                     self._check_cancelled(cancel_event)
                     if page.is_closed():
@@ -175,13 +201,27 @@ class BrowserPublisher(ABC):
                 button.click(timeout=15_000)
                 self._click_secondary_confirmation(page)
                 return self._wait_for_result(page)
+            except PublicationCancelled:
+                raise
+            except Exception as exc:
+                if self._page_was_closed(page) or self._is_closed_target_error(exc):
+                    raise PublicationCancelled(
+                        f"{self.display_name}发布页已关闭，任务已取消，可以直接重试"
+                    ) from exc
+                raise
             finally:
-                context.close()
+                try:
+                    context.close()
+                except Exception:
+                    # A manually closed browser can make Playwright's close call fail.
+                    # The publication worker must still unwind and release the platform lock.
+                    pass
 
     def _wait_for_file_input(self, page, snapshot, cancel_event: threading.Event):
         deadline = time.monotonic() + 15 * 60
         while time.monotonic() < deadline:
             self._check_cancelled(cancel_event)
+            self._ensure_page_available(page)
             self._choose_upload_mode(page, snapshot)
             inputs = page.locator("input[type='file']")
             for index in range(inputs.count()):
@@ -200,9 +240,19 @@ class BrowserPublisher(ABC):
         return None
 
     def _wait_and_fill_metadata(self, page, snapshot: PublishSnapshot, cancel_event: threading.Event) -> None:
-        deadline = time.monotonic() + 8 * 60
+        deadline = time.monotonic() + 2 * 60
+        left_editor_at: float | None = None
         while time.monotonic() < deadline:
             self._check_cancelled(cancel_event)
+            self._ensure_page_available(page)
+            if self.platform == "douyin" and not self._is_publish_editor_url(page.url):
+                left_editor_at = left_editor_at or time.monotonic()
+                if time.monotonic() - left_editor_at >= 2:
+                    raise PublicationCancelled(
+                        "已离开抖音发布页或取消素材上传，任务已取消，可以直接重试"
+                    )
+            else:
+                left_editor_at = None
             filled = self._fill_metadata(page, snapshot)
             if filled:
                 return
@@ -211,8 +261,34 @@ class BrowserPublisher(ABC):
 
     def _fill_metadata(self, page, snapshot: PublishSnapshot) -> bool:
         title_done = not snapshot.title.strip() or self._fill_first(page, self.title_selectors, snapshot.title)
-        body_done = not snapshot.body.strip() or self._fill_first(page, self.body_selectors, snapshot.body)
+        body = self._body_for_prefill(snapshot)
+        body_done = not body.strip() or self._fill_first(page, self.body_selectors, body)
         return title_done and body_done
+
+    def _body_for_prefill(self, snapshot: PublishSnapshot) -> str:
+        if self.platform not in {"douyin", "xiaohongshu"}:
+            return snapshot.body
+        body = INTERACTIVE_TOKEN_PATTERN.sub("", snapshot.body)
+        lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in body.splitlines()]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+    @staticmethod
+    def _interactive_tokens(body: str) -> list[str]:
+        return list(dict.fromkeys(INTERACTIVE_TOKEN_PATTERN.findall(body)))
+
+    def _review_message(self, snapshot: PublishSnapshot, visibility_message: str) -> str:
+        tokens = self._interactive_tokens(snapshot.body)
+        if self.platform in {"douyin", "xiaohongshu"} and tokens:
+            token_text = " ".join(tokens[:12])
+            token_hint = f"；请在官方页面手动输入并点击下拉候选：{token_text}"
+        elif self.platform in {"douyin", "xiaohongshu"}:
+            token_hint = "；如需 #tag 或 @用户，请在官方页面输入并点击下拉候选"
+        else:
+            token_hint = ""
+        return f"{visibility_message}{token_hint}；请检查封面、分区等选项，然后回到 Content Hub 确认发布"
+
+    def _prepare_interactive_review(self, page, snapshot: PublishSnapshot) -> None:
+        return None
 
     def _read_metadata(self, page, snapshot: PublishSnapshot) -> tuple[str, str] | None:
         title = self._read_first(page, self.title_selectors)
@@ -221,7 +297,7 @@ class BrowserPublisher(ABC):
             return None
         return (
             snapshot.title if title is None else title.strip(),
-            snapshot.body if body is None else body.strip(),
+            self._body_for_prefill(snapshot) if body is None else body.strip(),
         )
 
     @staticmethod
@@ -294,6 +370,7 @@ class BrowserPublisher(ABC):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             self._check_cancelled(cancel_event)
+            self._ensure_page_available(page)
             if self._apply_visibility(page, visibility):
                 return True
             page.wait_for_timeout(500)
@@ -387,6 +464,41 @@ class BrowserPublisher(ABC):
         if cancel_event.is_set():
             raise PublicationCancelled("发布任务已取消")
 
+    def _ensure_page_available(self, page) -> None:
+        if self._page_was_closed(page):
+            raise PublicationCancelled(
+                f"{self.display_name}发布页已关闭，任务已取消，可以直接重试"
+            )
+
+    def _page_was_closed(self, page) -> bool:
+        if getattr(self, "_page_closed_event", None) is not None:
+            if self._page_closed_event.is_set():
+                return True
+        if page is None:
+            return False
+        try:
+            return page.is_closed()
+        except Exception:
+            return True
+
+    def _is_publish_editor_url(self, url: str) -> bool:
+        normalized = (url or "").casefold()
+        if self.platform == "douyin":
+            return "creator.douyin.com" in normalized and any(
+                path in normalized for path in ("/content/upload", "/content/post")
+            )
+        return True
+
+    @staticmethod
+    def _is_closed_target_error(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        return any(token in message for token in (
+            "target page, context or browser has been closed",
+            "page has been closed",
+            "browser has been closed",
+            "target closed",
+        ))
+
 
 class DouyinPublisher(BrowserPublisher):
     platform = "douyin"
@@ -402,6 +514,133 @@ class DouyinPublisher(BrowserPublisher):
         "textarea[placeholder*='描述']",
         "div[contenteditable='true']",
     )
+    topic_candidate_selectors = (
+        "[role='listbox']:visible [role='option']:visible",
+        ".semi-portal:visible .semi-select-option:visible",
+        "[class*='suggest']:visible [class*='item']:visible",
+        "[class*='topic']:visible [class*='item']:visible",
+        "[class*='popover']:visible [class*='item']:visible",
+        "[class*='dropdown']:visible [class*='item']:visible",
+    )
+
+    def __init__(self) -> None:
+        self._hashtags_attempted = False
+        self._bound_hashtags: list[str] = []
+        self._unresolved_hashtags: list[str] = []
+        self._opened_mention: str | None = None
+
+    def _fill_metadata(self, page, snapshot: PublishSnapshot) -> bool:
+        if not super()._fill_metadata(page, snapshot):
+            return False
+        hashtags, _mentions = split_interactive_tokens(snapshot.body)
+        if not hashtags or self._hashtags_attempted:
+            return True
+        editor = self._find_visible(page, self.body_selectors)
+        if editor is None:
+            return False
+        self._hashtags_attempted = True
+        self._append_and_bind_hashtags(page, editor, hashtags, bool(self._body_for_prefill(snapshot)))
+        return True
+
+    def _append_and_bind_hashtags(
+        self,
+        page,
+        editor,
+        hashtags: list[str],
+        has_plain_body: bool,
+    ) -> None:
+        editor.click(timeout=3000)
+        editor.press("Control+End")
+        if has_plain_body:
+            editor.press("Enter")
+            editor.press("Enter")
+        for index, hashtag in enumerate(hashtags):
+            if index:
+                editor.type(" ")
+            editor.type(f"#{hashtag}", delay=55)
+            if self._select_topic_candidate(page, hashtag):
+                self._bound_hashtags.append(hashtag)
+            else:
+                self._unresolved_hashtags.append(hashtag)
+
+    def _select_topic_candidate(self, page, hashtag: str) -> bool:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            for selector in self.topic_candidate_selectors:
+                candidates = page.locator(selector)
+                for index in range(min(candidates.count(), 12)):
+                    candidate = candidates.nth(index)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        text = candidate.inner_text(timeout=500)
+                        if not self._topic_candidate_matches(text, hashtag):
+                            continue
+                        candidate.click(timeout=2000)
+                        page.wait_for_timeout(250)
+                        return True
+                    except Exception:
+                        continue
+            page.wait_for_timeout(150)
+        return False
+
+    @staticmethod
+    def _topic_candidate_matches(candidate_text: str, hashtag: str) -> bool:
+        candidate = re.sub(r"\s+", " ", candidate_text).strip().lstrip("#＃").strip()
+        expected = re.escape(hashtag.strip())
+        return bool(re.match(rf"^{expected}(?:$|\s|[（(·])", candidate, re.IGNORECASE))
+
+    @staticmethod
+    def _find_visible(page, selectors: tuple[str, ...]):
+        for selector in selectors:
+            locator = page.locator(selector)
+            for index in range(min(locator.count(), 5)):
+                item = locator.nth(index)
+                try:
+                    if item.is_visible():
+                        return item
+                except Exception:
+                    continue
+        return None
+
+    def _review_message(self, snapshot: PublishSnapshot, visibility_message: str) -> str:
+        _hashtags, mentions = split_interactive_tokens(snapshot.body)
+        hints: list[str] = []
+        if self._bound_hashtags:
+            hints.append("已自动关联抖音话题：" + " ".join(f"#{tag}" for tag in self._bound_hashtags))
+        if self._unresolved_hashtags:
+            hints.append(
+                "以下话题未找到精确候选，请在官方页面重新输入并选择："
+                + " ".join(f"#{tag}" for tag in self._unresolved_hashtags)
+            )
+        if mentions:
+            prefix = (
+                f"已打开 @{self._opened_mention} 的官方下拉列表；请确认后继续处理用户："
+                if self._opened_mention
+                else "请在官方页面逐个输入并从下拉列表确认用户："
+            )
+            hints.append(prefix + " ".join(f"@{name}" for name in mentions))
+        if not hints:
+            hints.append("如需 @用户，请在官方页面输入并从下拉列表确认")
+        return f"{visibility_message}；{'；'.join(hints)}；请检查封面、分区等选项，然后回到 Content Hub 确认发布"
+
+    def _prepare_interactive_review(self, page, snapshot: PublishSnapshot) -> None:
+        _hashtags, mentions = split_interactive_tokens(snapshot.body)
+        if not mentions:
+            return
+        editor = self._find_visible(page, self.body_selectors)
+        if editor is None:
+            return
+        try:
+            editor.click(timeout=3000)
+            editor.press("Control+End")
+            editor.press("Enter")
+            editor.press("Enter")
+            editor.type(f"@{mentions[0]}", delay=70)
+            page.wait_for_timeout(500)
+            self._opened_mention = mentions[0]
+        except Exception:
+            self._opened_mention = None
 
 
 class XiaohongshuPublisher(BrowserPublisher):

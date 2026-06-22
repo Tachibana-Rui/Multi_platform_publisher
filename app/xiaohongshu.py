@@ -298,7 +298,7 @@ async def import_public_note(
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    target_dir = settings.upload_dir / post_id
+    target_dir = settings.upload_dir / post_id / "downloads"
     target_dir.mkdir(parents=True, exist_ok=False)
     total_size = 0
     try:
@@ -319,7 +319,7 @@ async def import_public_note(
                 total_size += details["file_size"]
                 if total_size > settings.max_import_total_bytes:
                     raise HTTPException(status_code=413, detail="作品媒体文件总大小超过导入限制")
-                details["storage_name"] = f"{post_id}/{path.name}"
+                details["storage_name"] = path.relative_to(settings.upload_dir).as_posix()
                 assets.append(details)
                 if source.media_type == "image":
                     image_downloaded += 1
@@ -332,4 +332,8 @@ async def import_public_note(
             return canonical_url, note, assets
     except Exception:
         shutil.rmtree(target_dir, ignore_errors=True)
+        try:
+            target_dir.parent.rmdir()
+        except OSError:
+            pass
         raise

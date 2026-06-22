@@ -30,6 +30,7 @@ PUBLICATION_PROGRESS = {
     "published": 100,
     "failed": 100,
     "cancelled": 100,
+    "unpublished": 100,
 }
 
 

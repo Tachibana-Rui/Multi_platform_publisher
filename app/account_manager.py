@@ -97,10 +97,15 @@ class AccountManager:
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
+                    page_closed = threading.Event()
+                    page.on("close", lambda: page_closed.set())
                     page.goto(ACCOUNT_URLS[platform], wait_until="domcontentloaded", timeout=90_000)
                     timeout = 15 * 60 if visible else 25
                     deadline = time.monotonic() + timeout
                     while time.monotonic() < deadline:
+                        if page_closed.is_set() or page.is_closed():
+                            self._set_state(platform, "not_logged_in", "登录窗口已关闭", checked=True)
+                            return
                         pages = [item for item in context.pages if not item.is_closed()]
                         if not pages:
                             self._set_state(platform, "not_logged_in", "登录窗口已关闭")
@@ -113,7 +118,12 @@ class AccountManager:
                     message = "登录等待超时，请重新打开登录窗口" if visible else "当前浏览器尚未登录"
                     self._set_state(platform, "not_logged_in", message, checked=True)
                 finally:
-                    context.close()
+                    try:
+                        context.close()
+                    except Exception:
+                        # Closing the window manually can disconnect Playwright first.
+                        # The account task still needs to release the shared platform lock.
+                        pass
         except Exception as exc:
             self._set_state(platform, "error", str(exc).strip() or exc.__class__.__name__, checked=True)
         finally:

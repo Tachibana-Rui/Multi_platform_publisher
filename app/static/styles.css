@@ -265,8 +265,10 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .queue-item-progress { overflow: hidden; height: 4px; margin-top: 8px; border-radius: 999px; background: #e8eae6; }
 .queue-item-progress span { display: block; height: 100%; background: var(--green); }
 .queue-item-side { display: grid; align-content: center; justify-items: end; gap: 6px; }
-.queue-item-actions { display: flex; gap: 5px; }
+.queue-item-actions { display: flex; max-width: 220px; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .queue-item-actions button { padding: 5px 7px; border: 0; border-radius: 6px; color: #59625c; background: #e9ece8; font-size: 9px; }
+.queue-item-actions .mark-published { color: #236b4d; background: #ddf2e7; }
+.queue-item-actions .delete { color: #a54335; background: #fbe5e0; }
 .config-body { display: grid; gap: 19px; padding: 27px; }
 .provider-banner { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid #e1e3dd; border-radius: 12px; background: #f6f7f4; }
 .provider-banner strong, .provider-banner small { display: block; }
@@ -294,6 +296,25 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .copy-source.llm { color: #654bc7; background: #ece7fc; }
 .copy-body-field textarea { min-height: 180px; }
 .prompt-field textarea { min-height: 75px; color: #5f655f; background: #f7f7f3; font-size: 10px; }
+.interactive-token-panel { display: grid; gap: 10px; padding: 13px; border: 1px solid #d9e3df; border-radius: 10px; background: #f4f8f6; }
+.interactive-token-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.interactive-token-heading strong, .interactive-token-heading small { display: block; }
+.interactive-token-heading strong { margin-bottom: 3px; color: #354b43; font-size: 10px; }
+.interactive-token-heading small { color: #7f8d87; font-size: 9px; }
+.interactive-token-heading > span { padding: 4px 7px; border-radius: 999px; color: #4d7465; background: #deeee7; font-size: 9px; white-space: nowrap; }
+.interactive-token-group { display: grid; grid-template-columns: 58px minmax(0,1fr); align-items: start; gap: 8px; }
+.interactive-token-group > span { padding-top: 5px; color: #7e8883; font-size: 9px; font-weight: 700; }
+.interactive-token-list { display: flex; min-height: 25px; flex-wrap: wrap; gap: 6px; }
+.interactive-token-list em { padding-top: 5px; color: #a0a7a3; font-size: 9px; font-style: normal; }
+.interactive-token { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border-radius: 7px; background: white; box-shadow: inset 0 0 0 1px #dfe6e2; }
+.interactive-token b { color: #3f5e52; font-size: 9px; }
+.interactive-token small { color: #448768; font-size: 8px; }
+.interactive-token.mention { box-shadow: inset 0 0 0 1px #e7ddc5; }
+.interactive-token.mention b { color: #715d31; }
+.interactive-token.mention small { color: #9a7228; }
+.official-edit-note { padding: 11px 12px; border: 1px solid #ead9a9; border-radius: 9px; color: #6f5825; background: #fff9e9; }
+.official-edit-note strong { display: block; margin-bottom: 4px; font-size: 10px; }
+.official-edit-note p { margin: 0; font-size: 9px; line-height: 1.55; }
 .generation-row { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 28px 18px; border-top: 1px solid var(--line); background: #fbfbf8; }
 .llm-readiness { display: flex; align-items: center; gap: 8px; color: #858a83; }
 .llm-readiness.warning { cursor: pointer; }
@@ -331,6 +352,7 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .publication-status.review_pending { color: #825718; background: #fff0ce; }
 .publication-status.published, .publication-status.submitted { color: #276e50; background: #def3e7; }
 .publication-status.failed { color: #a54335; background: #fbe5e0; }
+.publication-status.unpublished { color: #656b65; background: #e8ebe7; }
 .review-callout { padding: 9px; border-radius: 8px; color: #785b2c; background: #fff7e7; font-size: 10px; line-height: 1.5; }
 .publication-errors { color: #a54335; font-size: 10px; line-height: 1.55; }
 .publication-action { padding: 8px 11px; border: 0; border-radius: 8px; color: #4e5650; background: #e8ebe7; font-size: 10px; font-weight: 750; }
@@ -346,6 +368,11 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .platform-launch-button strong { margin-bottom: 3px; font-size: 10px; }
 .platform-launch-button small { color: #918aa6; font-size: 10px; }
 .platform-launch-button b { margin-left: auto; font-weight: 400; }
+.copy-sync-panel { display: grid; gap: 7px; padding: 11px; border: 1px solid #d8e2da; border-radius: 10px; background: #f2f7f3; }
+.copy-sync-panel strong, .copy-sync-panel small { display: block; }
+.copy-sync-panel strong { margin-bottom: 3px; color: #3e5145; font-size: 10px; }
+.copy-sync-panel small { color: #839087; font-size: 9px; line-height: 1.45; }
+.copy-sync-panel button { padding: 8px 9px; border: 1px solid #ccd9d0; border-radius: 7px; color: #3f6851; background: white; font-size: 9px; text-align: left; }
 .library-modal { width: min(960px, 100%); }
 .library-body { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 520px; max-height: calc(100vh - 125px); overflow: hidden; }
 .root-section, .library-search-section { padding: 24px; overflow-y: auto; }

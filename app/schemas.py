@@ -130,7 +130,7 @@ class StorageSettingsUpdate(BaseModel):
 
 
 PlatformName = Literal[
-    "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels", "wechat_moments"
+    "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels"
 ]
 
 
@@ -151,7 +151,7 @@ class GenerateCopyRequest(BaseModel):
     custom_prompt: str | None = Field(default=None, max_length=4000)
 
 
-PublishPlatform = Literal["douyin", "xiaohongshu", "bilibili", "wechat_moments"]
+PublishPlatform = Literal["douyin", "xiaohongshu", "bilibili"]
 PublicationVisibility = Literal["public", "friends", "private"]
 
 

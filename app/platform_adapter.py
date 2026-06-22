@@ -11,7 +11,7 @@ from .doubao import build_generation_prompt
 
 
 SUPPORTED_PLATFORMS = {
-    "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels", "wechat_moments"
+    "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels"
 }
 
 

@@ -135,7 +135,6 @@
               <option value="douyin">抖音</option>
               <option value="xiaohongshu">小红书</option>
               <option value="bilibili">B站</option>
-              <option value="wechat_moments">微信朋友圈</option>
             </select>
           </label>
         </div>
@@ -159,7 +158,6 @@
             <label><input type="checkbox" value="douyin" checked><span>抖音</span></label>
             <label><input type="checkbox" value="xiaohongshu" checked><span>小红书</span></label>
             <label><input type="checkbox" value="bilibili"><span>B站</span></label>
-            <label><input type="checkbox" value="wechat_moments"><span>微信朋友圈</span></label>
           </fieldset>
           <label class="field"><span>谁可以看</span>
             <select id="queueVisibility"><option value="public">公开可见</option><option value="friends">仅互关好友可见</option><option value="private">仅自己可见</option></select>
@@ -271,7 +269,7 @@
   <div class="modal-backdrop" id="platformModal" hidden>
     <section class="modal platform-modal" role="dialog" aria-modal="true" aria-labelledby="platformModalTitle">
       <header class="modal-header">
-        <div><p class="eyebrow">PLATFORM DRAFT</p><h2 id="platformModalTitle">平台发布窗口</h2></div>
+        <div><p class="eyebrow">OFFICIAL PAGE HANDOFF</p><h2 id="platformModalTitle">平台发布准备</h2></div>
         <button class="icon-button" id="closePlatformButton" type="button" aria-label="关闭">×</button>
       </header>
       <div class="platform-body">
@@ -283,7 +281,6 @@
                 <option value="douyin">抖音</option>
                 <option value="xiaohongshu">小红书</option>
                 <option value="bilibili">B站</option>
-                <option value="wechat_moments">微信朋友圈</option>
               </select>
             </label>
             <label><span>谁可以看</span>
@@ -296,18 +293,36 @@
             <span class="copy-source" id="copySourceBadge">原文复制</span>
             </div>
             <label class="field">
-            <span>平台标题</span>
-            <input id="platformTitle" maxlength="300" placeholder="标题为空时可调用豆包生成">
+            <span>预填标题</span>
+            <input id="platformTitle" maxlength="300" placeholder="用于打开官方发布页时预填">
             </label>
             <label class="field copy-body-field">
-            <span>平台正文</span>
-            <textarea id="platformBody" rows="9" maxlength="100000" placeholder="正文为空时可调用豆包生成"></textarea>
+            <span>正文与互动元素</span>
+            <textarea id="platformBody" rows="9" maxlength="100000" placeholder="正文末尾可以保留 #tag 和 @用户"></textarea>
             </label>
+            <section class="interactive-token-panel" id="interactiveTokenPanel">
+              <div class="interactive-token-heading">
+                <div><strong>抖音互动元素</strong><small>发布时转换为平台可识别的话题和提及</small></div>
+                <span id="interactiveTokenSummary">尚未检测到</span>
+              </div>
+              <div class="interactive-token-group">
+                <span>话题</span>
+                <div class="interactive-token-list" id="hashtagTokenList"></div>
+              </div>
+              <div class="interactive-token-group">
+                <span>提及用户</span>
+                <div class="interactive-token-list" id="mentionTokenList"></div>
+              </div>
+            </section>
             <label class="field prompt-field">
             <span>本次生成 Prompt</span>
             <textarea id="generationPrompt" rows="3" maxlength="4000"></textarea>
             <small class="field-help">可以直接修改。每次点击生成都会得到一个新版本。</small>
             </label>
+            <div class="official-edit-note" id="officialEditNote">
+              <strong>抖音话题自动关联</strong>
+              <p>Agent 会逐个输入 #tag 并选择抖音话题候选；如有 @用户，还会输入第一位并打开官方下拉列表供你确认。</p>
+            </div>
           </div>
           <div class="generation-row">
             <div class="llm-readiness" id="llmReadiness"><span></span><p>正在检查豆包配置…</p></div>
@@ -326,8 +341,8 @@
         <div class="version-meta" id="versionMeta">尚未调用 LLM</div>
         <div class="footer-actions">
           <button class="secondary-button" id="cancelPlatformButton" type="button">关闭</button>
-          <button class="primary-button" id="savePlatformButton" type="button">保存发布草稿</button>
-          <button class="publish-agent-button" id="preparePublishButton" type="button">准备发布</button>
+          <button class="primary-button" id="savePlatformButton" type="button">保存预填草稿</button>
+          <button class="publish-agent-button" id="preparePublishButton" type="button">保存并打开官方发布页</button>
         </div>
       </footer>
     </section>
@@ -483,8 +498,13 @@
               <span>来源链接</span>
               <input id="sourceUrl" name="source_url" type="url" placeholder="https://…">
             </label>
+            <section class="copy-sync-panel" id="copySyncPanel" hidden>
+              <div><strong>同步平台文案</strong><small>将已有平台标题和正文填入当前编辑器</small></div>
+              <button type="button" data-sync-platform="xiaohongshu" hidden>同步小红书文案</button>
+              <button type="button" data-sync-platform="douyin" hidden>同步抖音文案</button>
+            </section>
             <button class="platform-launch-button" id="openPlatformButton" type="button" hidden>
-              <span>✦</span><div><strong>平台发布窗口</strong><small>选择图片、生成并编辑平台文案</small></div><b>→</b>
+              <span>✦</span><div><strong>平台发布准备</strong><small>生成文案，并在抖音关联话题与用户</small></div><b>→</b>
             </button>
             <div class="editor-tip">
               <span>✦</span>

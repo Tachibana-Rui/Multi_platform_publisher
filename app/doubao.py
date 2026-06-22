@@ -21,7 +21,6 @@ PLATFORM_NAMES = {
     "bilibili": "B站",
     "kuaishou": "快手",
     "wechat_channels": "视频号",
-    "wechat_moments": "微信朋友圈",
 }
 SYSTEM_PROMPT = """你是专业的跨平台社交媒体文案编辑。根据用户提供的角色、标签和图片，为指定平台生成自然、有辨识度且不过度营销的中文标题、正文和标签。
 不得虚构图片中无法确认的信息，不添加站外导流，不使用夸大承诺。

@@ -2,12 +2,12 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 
 from .config import settings
+from .media_storage import original_storage_name
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
@@ -23,17 +23,17 @@ def classify_file(filename: str) -> tuple[str, str]:
     raise HTTPException(status_code=415, detail="仅支持常见图片或视频格式")
 
 
-async def save_upload(upload: UploadFile, post_id: str) -> dict:
+async def save_upload(upload: UploadFile, post_id: str, position: int) -> dict:
     original_name = Path(upload.filename or "unnamed").name[:255]
+    mime_type = upload.content_type or "application/octet-stream"
     try:
-        media_type, suffix = classify_file(original_name)
+        media_type, _suffix = classify_file(original_name)
     except Exception:
         await upload.close()
         raise
-    post_dir = settings.upload_dir / post_id
-    post_dir.mkdir(parents=True, exist_ok=True)
-    storage_name = f"{post_id}/{uuid4().hex}{suffix}"
+    storage_name = original_storage_name(post_id, position, original_name)
     target = settings.upload_dir / storage_name
+    target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     size = 0
 
@@ -56,7 +56,7 @@ async def save_upload(upload: UploadFile, post_id: str) -> dict:
         "original_name": original_name,
         "storage_name": storage_name,
         "media_type": media_type,
-        "mime_type": upload.content_type or "application/octet-stream",
+        "mime_type": mime_type,
         "file_size": size,
         "checksum": digest.hexdigest(),
         "width": width,

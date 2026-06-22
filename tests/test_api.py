@@ -1,11 +1,13 @@
 import io
 import atexit
+import hashlib
 import os
 from pathlib import Path
 import tempfile
 import time
 
 from PIL import Image, ImageDraw
+from sqlalchemy import select
 
 
 _temp_dir = tempfile.TemporaryDirectory()
@@ -72,7 +74,7 @@ def test_content_hub_crud_and_asset_flow():
         assert uploaded.status_code == 201
         post = uploaded.json()
         assert post["content_type"] == "image"
-        assert post["assets"][0]["url"].startswith(f"/media/{post['id']}/")
+        assert post["assets"][0]["url"].endswith(f"/{post['id']}/originals/01_cover.png")
         assert post["assets"][0]["width"] == 32
         assert post["assets"][0]["height"] == 24
 
@@ -271,6 +273,7 @@ def test_platform_version_copies_source_and_can_regenerate(monkeypatch):
             files=[("files", ("reference.png", make_png(), "image/png"))],
         ).json()
 
+        assert client.get(f"/api/posts/{post['id']}/platform-versions").json() == []
         version = client.get(f"/api/posts/{post['id']}/platform-versions/douyin")
         assert version.status_code == 200
         version_data = version.json()
@@ -279,6 +282,8 @@ def test_platform_version_copies_source_and_can_regenerate(monkeypatch):
         assert version_data["content_source"] == "copied"
         assert version_data["selected_asset_ids"] == [uploaded["assets"][0]["id"]]
         assert version_data["suggested_prompt"] == "生成 NIKKE 艾德 cos 抖音 标题和文案，并生成5个相关标签追加在正文末尾。"
+        available = client.get(f"/api/posts/{post['id']}/platform-versions").json()
+        assert [item["platform"] for item in available] == ["douyin"]
 
         first = client.post(
             f"/api/posts/{post['id']}/platform-versions/douyin/generate",
@@ -473,13 +478,13 @@ def test_storage_location_can_be_changed_without_breaking_media(monkeypatch):
 def _fake_import_asset(post_id: str) -> list[dict]:
     from app.config import settings
 
-    target = settings.upload_dir / post_id
+    target = settings.upload_dir / post_id / "downloads"
     target.mkdir(parents=True, exist_ok=True)
     path = target / "import.png"
     path.write_bytes(make_png())
     return [{
         "original_name": "import.png",
-        "storage_name": f"{post_id}/import.png",
+        "storage_name": f"{post_id}/downloads/import.png",
         "media_type": "image",
         "mime_type": "image/png",
         "file_size": path.stat().st_size,
@@ -534,23 +539,17 @@ def test_batch_douyin_import_keeps_success_when_another_link_fails(monkeypatch):
         assert len(client.get("/api/posts", params={"search": "抖音作品"}).json()) == 1
 
 
-def test_wechat_moments_platform_version_and_publication(monkeypatch):
-    monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
+def test_wechat_moments_publication_is_removed():
     with TestClient(app) as client:
-        post = client.post("/api/posts", json={"title": "朋友圈标题", "body": "朋友圈正文"}).json()
-        post = client.post(
-            f"/api/posts/{post['id']}/assets",
-            files=[("files", ("moment.png", make_png(), "image/png"))],
-        ).json()
+        post = client.post("/api/posts", json={"title": "不再发布朋友圈"}).json()
         version = client.get(
             f"/api/posts/{post['id']}/platform-versions/wechat_moments"
         )
-        assert version.status_code == 200
+        assert version.status_code == 422
         created = client.post("/api/publications", json={
             "post_id": post["id"], "platform": "wechat_moments", "visibility": "friends",
         })
-        assert created.status_code == 201
-        assert created.json()["platform"] == "wechat_moments"
+        assert created.status_code == 422
 
 
 def test_batch_import_job_reports_post_and_image_progress(monkeypatch):
@@ -617,13 +616,58 @@ def test_multi_platform_batch_publication_and_published_metadata(monkeypatch):
         with SessionLocal() as db:
             published = db.get(PlatformPublication, publications[0]["id"])
             published.status = "published"
-            published.published_at = publication_time = published.updated_at
+            published.published_at = published.updated_at
             db.commit()
         listing = client.get("/api/publications", params={"status": "published"}).json()
         record = next(item for item in listing if item["id"] == publications[0]["id"])
         assert record["post_title"] == "多平台批量发布"
         assert record["progress"] == 100
         assert record["published_at"] is not None
+
+
+def test_publication_record_can_be_marked_and_deleted(monkeypatch):
+    monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "人工修正发布状态"}).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[("files", ("manual-status.png", make_png(), "image/png"))],
+        ).json()
+        publication = client.post("/api/publications", json={
+            "post_id": post["id"], "platform": "douyin",
+        }).json()
+
+        active_delete = client.delete(f"/api/publications/{publication['id']}")
+        assert active_delete.status_code == 409
+
+        from app.database import SessionLocal
+        from app.models import PlatformPublication
+
+        with SessionLocal() as db:
+            record = db.get(PlatformPublication, publication["id"])
+            record.status = "failed"
+            record.error_message = "平台已发布但回传检测失败"
+            db.commit()
+
+        published = client.post(
+            f"/api/publications/{publication['id']}/mark-published"
+        )
+        assert published.status_code == 200
+        assert published.json()["status"] == "published"
+        assert published.json()["published_at"] is not None
+        assert published.json()["error_message"] is None
+
+        unpublished = client.post(
+            f"/api/publications/{publication['id']}/mark-unpublished"
+        )
+        assert unpublished.status_code == 200
+        assert unpublished.json()["status"] == "unpublished"
+        assert unpublished.json()["published_at"] is None
+        assert unpublished.json()["progress"] == 100
+
+        deleted = client.delete(f"/api/publications/{publication['id']}")
+        assert deleted.status_code == 204
+        assert client.get(f"/api/publications/{publication['id']}").status_code == 404
 
 
 def test_doubao_copy_appends_exactly_five_tags():
@@ -635,3 +679,162 @@ def test_doubao_copy_appends_exactly_five_tags():
     )
     assert result["tags"] == ["夜景人像", "城市摄影", "氛围感", "夜拍", "摄影分享"]
     assert result["body"].endswith("#夜景人像 #城市摄影 #氛围感 #夜拍 #摄影分享")
+
+
+def test_legacy_media_files_migrate_to_originals_and_downloads():
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.media_storage import migrate_media_layout
+    from app.models import MediaAsset
+
+    with TestClient(app) as client:
+        manual = client.post("/api/posts", json={"title": "旧本地素材", "source_platform": "manual"}).json()
+        downloaded = client.post("/api/posts", json={"title": "旧下载素材", "source_platform": "xiaohongshu"}).json()
+
+    payload = make_png()
+    checksum = hashlib.sha256(payload).hexdigest()
+    manual_old = settings.upload_dir / manual["id"] / "legacy-manual.png"
+    download_old = settings.upload_dir / downloaded["id"] / "legacy-download.png"
+    manual_old.parent.mkdir(parents=True, exist_ok=True)
+    download_old.parent.mkdir(parents=True, exist_ok=True)
+    manual_old.write_bytes(payload)
+    download_old.write_bytes(payload)
+    with SessionLocal() as db:
+        db.add_all([
+            MediaAsset(
+                post_id=manual["id"], original_name="portrait：source.png",
+                storage_name=f"{manual['id']}/legacy-manual.png", media_type="image",
+                mime_type="image/png", file_size=len(payload), checksum=checksum,
+                width=32, height=24, position=0,
+            ),
+            MediaAsset(
+                post_id=downloaded["id"], original_name="download.png",
+                storage_name=f"{downloaded['id']}/legacy-download.png", media_type="image",
+                mime_type="image/png", file_size=len(payload), checksum=checksum,
+                width=32, height=24, position=0,
+            ),
+        ])
+        db.commit()
+
+    result = migrate_media_layout()
+    assert result["moved_assets"] == 2
+    with SessionLocal() as db:
+        manual_asset = db.scalar(select(MediaAsset).where(MediaAsset.post_id == manual["id"]))
+        download_asset = db.scalar(select(MediaAsset).where(MediaAsset.post_id == downloaded["id"]))
+        assert manual_asset.storage_name == f"{manual['id']}/originals/01_portrait：source.png"
+        assert download_asset.storage_name == f"{downloaded['id']}/downloads/legacy-download.png"
+        assert (settings.upload_dir / manual_asset.storage_name).is_file()
+        assert (settings.upload_dir / download_asset.storage_name).is_file()
+    assert not manual_old.exists()
+    assert not download_old.exists()
+
+
+def test_douyin_prefill_separates_topics_and_mentions_for_platform_selection():
+    from app.publishers.base import PublishSnapshot
+    from app.publishers.browser import (
+        DouyinPublisher,
+        XiaohongshuPublisher,
+        split_interactive_tokens,
+    )
+
+    snapshot = PublishSnapshot(
+        id="publication", post_id="post", platform="douyin", visibility="public",
+        title="标题", body="普通正文 @Alice @alice\n\n#摄影 ＃夜景 #摄影", assets=[],
+    )
+    hashtags, mentions = split_interactive_tokens(snapshot.body)
+    assert hashtags == ["摄影", "夜景"]
+    assert mentions == ["Alice"]
+
+    publisher = DouyinPublisher()
+    assert publisher._body_for_prefill(snapshot) == "普通正文"
+    publisher._bound_hashtags = ["摄影"]
+    publisher._unresolved_hashtags = ["夜景"]
+    message = publisher._review_message(snapshot, "已设置为公开可见")
+    assert "已自动关联抖音话题：#摄影" in message
+    assert "未找到精确候选" in message
+    assert "@Alice" in message
+    assert "下拉列表确认" in message
+
+    message = XiaohongshuPublisher()._review_message(snapshot, "已设置为公开可见")
+    assert "@Alice" in message
+    assert "#摄影" in message
+    assert "点击下拉候选" in message
+
+
+def test_douyin_topic_candidate_requires_an_exact_name_boundary():
+    from app.publishers.browser import DouyinPublisher
+
+    assert DouyinPublisher._topic_candidate_matches("#摄影 128.6亿次播放", "摄影")
+    assert DouyinPublisher._topic_candidate_matches("摄影（话题）", "摄影")
+    assert not DouyinPublisher._topic_candidate_matches("摄影技巧", "摄影")
+
+
+def test_closed_douyin_page_is_treated_as_a_cancelled_publication():
+    import threading
+
+    from app.publishers.base import PublicationCancelled
+    from app.publishers.browser import DouyinPublisher
+
+    class ClosedPage:
+        @staticmethod
+        def is_closed():
+            return True
+
+    publisher = DouyinPublisher()
+    publisher._page_closed_event = threading.Event()
+    try:
+        publisher._ensure_page_available(ClosedPage())
+    except PublicationCancelled as exc:
+        assert "可以直接重试" in str(exc)
+    else:
+        raise AssertionError("closed platform page should cancel the publication")
+
+    assert publisher._is_publish_editor_url(
+        "https://creator.douyin.com/creator-micro/content/upload"
+    )
+    assert publisher._is_publish_editor_url(
+        "https://creator.douyin.com/creator-micro/content/post/video"
+    )
+    assert not publisher._is_publish_editor_url(
+        "https://creator.douyin.com/creator-micro/content/manage"
+    )
+
+
+def test_publish_agent_releases_platform_lock_after_page_cancellation(monkeypatch):
+    import threading
+
+    from app.database import SessionLocal
+    from app.models import PlatformPublication
+    from app.publish_agent import publication_agent
+    from app.publishers.base import PublicationCancelled
+    from app.publishers.browser import PLATFORM_BROWSER_LOCKS
+
+    monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "关闭发布窗口"}).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[("files", ("cancel-window.png", make_png(), "image/png"))],
+        ).json()
+        publication = client.post("/api/publications", json={
+            "post_id": post["id"], "platform": "douyin",
+        }).json()
+
+    class CancelledPublisher:
+        @staticmethod
+        def validate(_snapshot):
+            return []
+
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            raise PublicationCancelled("抖音发布页已关闭，任务已取消，可以直接重试")
+
+    monkeypatch.setattr("app.publish_agent.get_publisher", lambda _platform: CancelledPublisher())
+    platform_lock = PLATFORM_BROWSER_LOCKS["douyin"]
+    assert not platform_lock.locked()
+    publication_agent._run(publication["id"], threading.Event(), threading.Event())
+    assert not platform_lock.locked()
+    with SessionLocal() as db:
+        record = db.get(PlatformPublication, publication["id"])
+        assert record.status == "cancelled"
+        assert "可以直接重试" in record.error_message

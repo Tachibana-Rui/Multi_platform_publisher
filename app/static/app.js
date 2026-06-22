@@ -15,6 +15,7 @@ const state = {
   accountPollTimer: null,
   browserSyncedContent: null,
   assetMatches: [],
+  editorPlatformVersions: {},
   importJob: null,
   importPollTimer: null,
   publishedPublications: [],
@@ -64,6 +65,7 @@ const elements = {
   matchButton: document.querySelector("#matchOriginalButton"),
   manualMatchButton: document.querySelector("#manualMatchButton"),
   openPlatformButton: document.querySelector("#openPlatformButton"),
+  copySyncPanel: document.querySelector("#copySyncPanel"),
   aiConfigModal: document.querySelector("#aiConfigModal"),
   aiConfigForm: document.querySelector("#aiConfigForm"),
   doubaoApiKey: document.querySelector("#doubaoApiKey"),
@@ -83,6 +85,11 @@ const elements = {
   publicationVisibility: document.querySelector("#publicationVisibility"),
   platformTitle: document.querySelector("#platformTitle"),
   platformBody: document.querySelector("#platformBody"),
+  interactiveTokenPanel: document.querySelector("#interactiveTokenPanel"),
+  interactiveTokenSummary: document.querySelector("#interactiveTokenSummary"),
+  hashtagTokenList: document.querySelector("#hashtagTokenList"),
+  mentionTokenList: document.querySelector("#mentionTokenList"),
+  officialEditNote: document.querySelector("#officialEditNote"),
   generationPrompt: document.querySelector("#generationPrompt"),
   generateCopy: document.querySelector("#generateCopyButton"),
   platformAssets: document.querySelector("#platformAssetsGrid"),
@@ -219,6 +226,7 @@ function openEditor(post = null) {
   state.editingPost = post;
   state.pendingFiles = [];
   state.assetMatches = [];
+  state.editorPlatformVersions = {};
   elements.form.reset();
   document.querySelector("#modalTitle").textContent = post ? "编辑内容" : "新建内容";
   elements.deletePost.hidden = !post;
@@ -235,10 +243,29 @@ function openEditor(post = null) {
   elements.matchActions.hidden = !post || !post.assets.some((asset) => asset.media_type === "image");
   elements.manualMatchButton.hidden = true;
   elements.openPlatformButton.hidden = !post;
-  if (post) loadMatches(post.id).catch((error) => toast(error.message, true));
+  elements.copySyncPanel.hidden = true;
+  elements.copySyncPanel.querySelectorAll("[data-sync-platform]").forEach((button) => { button.hidden = true; });
+  if (post) {
+    loadMatches(post.id).catch((error) => toast(error.message, true));
+    loadEditorPlatformVersions(post.id).catch((error) => toast(error.message, true));
+  }
   elements.modal.hidden = false;
   document.body.style.overflow = "hidden";
   window.setTimeout(() => elements.title.focus(), 30);
+}
+
+async function loadEditorPlatformVersions(postId) {
+  const versions = await api(`/api/posts/${postId}/platform-versions`);
+  if (state.editingPost?.id !== postId) return;
+  state.editorPlatformVersions = Object.fromEntries(
+    versions.filter((version) => version.title || version.body).map((version) => [version.platform, version]),
+  );
+  let visible = false;
+  elements.copySyncPanel.querySelectorAll("[data-sync-platform]").forEach((button) => {
+    button.hidden = !state.editorPlatformVersions[button.dataset.syncPlatform];
+    visible ||= !button.hidden;
+  });
+  elements.copySyncPanel.hidden = !visible;
 }
 
 function closeEditor() {
@@ -381,6 +408,45 @@ const platformLabels = {
   kuaishou: "快手", wechat_channels: "视频号", wechat_moments: "微信朋友圈",
 };
 
+function splitInteractiveTokens(body) {
+  const result = { hashtags: [], mentions: [] };
+  const seen = new Set();
+  const pattern = /(^|[^\p{L}\p{N}_])([#＃@＠][^\s#＃@＠,，。.!！?？;；:：]+)/gu;
+  for (const match of String(body || "").matchAll(pattern)) {
+    const marker = "#＃".includes(match[2][0]) ? "#" : "@";
+    const value = match[2].slice(1).trim();
+    const key = `${marker}:${value.toLocaleLowerCase()}`;
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    result[marker === "#" ? "hashtags" : "mentions"].push(value);
+  }
+  return result;
+}
+
+function renderInteractiveTokens() {
+  const { hashtags, mentions } = splitInteractiveTokens(elements.platformBody.value);
+  const isDouyin = state.adapterPlatform === "douyin";
+  elements.interactiveTokenPanel.hidden = !isDouyin;
+  const noteTitle = elements.officialEditNote.querySelector("strong");
+  const noteBody = elements.officialEditNote.querySelector("p");
+  if (!isDouyin) {
+    noteTitle.textContent = "#tag 与 @用户以官方页面为准";
+    noteBody.textContent = "当前平台暂不自动关联话题或用户，请在官方页面输入并点击平台下拉候选。";
+    return;
+  }
+  elements.interactiveTokenSummary.textContent = hashtags.length || mentions.length
+    ? `${hashtags.length} 个话题 · ${mentions.length} 个用户`
+    : "尚未检测到";
+  elements.hashtagTokenList.innerHTML = hashtags.length
+    ? hashtags.map((tag) => `<span class="interactive-token hashtag"><b>#${escapeHtml(tag)}</b><small>自动关联</small></span>`).join("")
+    : '<em>正文中没有 #tag</em>';
+  elements.mentionTokenList.innerHTML = mentions.length
+    ? mentions.map((name) => `<span class="interactive-token mention"><b>@${escapeHtml(name)}</b><small>官方下拉选择</small></span>`).join("")
+    : '<em>正文中没有 @用户</em>';
+  noteTitle.textContent = "抖音话题自动关联";
+  noteBody.textContent = "Agent 会逐个输入 #tag 并选择精确话题候选；如有 @用户，还会输入第一位并打开官方下拉列表供你确认。";
+}
+
 function selectedPlatformAssetIds() {
   return [...elements.platformAssets.querySelectorAll("input:checked")].map((input) => input.value);
 }
@@ -416,6 +482,7 @@ function renderPlatformVersion(version) {
   state.platformVersion = version;
   elements.platformTitle.value = version.title;
   elements.platformBody.value = version.body;
+  renderInteractiveTokens();
   elements.copySourceBadge.textContent = version.content_source === "llm"
     ? "LLM 生成" : version.content_source === "manual"
       ? "人工编辑" : version.content_source === "browser" ? "平台页同步" : "原文复制";
@@ -457,6 +524,7 @@ const publicationStatusLabels = {
   pending: "等待启动", validating: "正在校验", queued: "排队中", awaiting_login: "等待登录",
   preparing: "正在上传和填写", review_pending: "等待最终确认", publishing: "正在发布",
   submitted: "已提交平台", published: "发布成功", failed: "发布失败", cancelled: "已取消",
+  unpublished: "未发布",
 };
 
 function publicationCover(publication, className) {
@@ -480,7 +548,7 @@ function renderPublishedWorks() {
         <div class="published-card-head"><span class="platform-pill">${platformLabels[item.platform] || item.platform}</span><time>${formatDate(item.published_at || item.updated_at)}</time></div>
         <h3 title="${escapeHtml(item.title || item.post_title)}">${escapeHtml(item.title || item.post_title || "未命名内容")}</h3>
         <p>${escapeHtml(item.body || "暂无平台正文")}</p>
-        <div class="published-card-footer"><span>${item.status === "published" ? "发布成功" : "已提交平台"}</span>${item.platform_url ? `<a href="${escapeHtml(item.platform_url)}" target="_blank" rel="noreferrer">查看作品 ↗</a>` : ""}</div>
+        <div class="published-card-footer"><span>发布成功</span>${item.platform_url ? `<a href="${escapeHtml(item.platform_url)}" target="_blank" rel="noreferrer">查看作品 ↗</a>` : ""}</div>
       </div>
     </article>`).join("") : '<div class="library-empty">完成一次平台发布后，作品会按平台出现在这里。</div>';
 }
@@ -489,7 +557,7 @@ async function openPlatformManager() {
   elements.platformManagerModal.hidden = false;
   document.body.style.overflow = "hidden";
   const publications = await api("/api/publications");
-  state.publishedPublications = publications.filter((item) => ["published", "submitted"].includes(item.status));
+  state.publishedPublications = publications.filter((item) => item.status === "published");
   renderPublishedWorks();
 }
 
@@ -499,16 +567,27 @@ function closePlatformManager() {
 }
 
 function queueActionMarkup(publication) {
+  const actions = [];
   if (publication.status === "review_pending") {
-    return '<button data-queue-action="confirm">确认发布</button>';
+    actions.push('<button data-queue-action="confirm">确认发布</button>');
   }
-  if (["failed", "cancelled"].includes(publication.status)) {
-    return '<button data-queue-action="retry">重试</button>';
+  if (["failed", "cancelled", "unpublished"].includes(publication.status)
+      && publication.platform !== "wechat_moments") {
+    actions.push('<button data-queue-action="retry">重试</button>');
   }
   if (["pending", "validating", "queued", "awaiting_login", "preparing"].includes(publication.status)) {
-    return '<button data-queue-action="cancel">取消</button>';
+    actions.push('<button data-queue-action="cancel">取消</button>');
   }
-  return "";
+  if (["submitted", "published", "failed", "cancelled", "unpublished"].includes(publication.status)) {
+    if (publication.status !== "published") {
+      actions.push('<button class="mark-published" data-queue-action="mark-published">标记已发布</button>');
+    }
+    if (publication.status !== "unpublished") {
+      actions.push('<button data-queue-action="mark-unpublished">标记未发布</button>');
+    }
+    actions.push('<button class="delete" data-queue-action="delete">删除记录</button>');
+  }
+  return actions.join("");
 }
 
 function queueVisiblePublications() {
@@ -530,7 +609,7 @@ function renderPublishQueue() {
   elements.queueProgressValue.textContent = `${progress}%`;
   const progressTrack = elements.queueProgressBar.parentElement;
   progressTrack.setAttribute("aria-valuenow", String(progress));
-  const terminal = items.filter((item) => ["submitted", "published", "failed", "cancelled"].includes(item.status)).length;
+  const terminal = items.filter((item) => ["submitted", "published", "failed", "cancelled", "unpublished"].includes(item.status)).length;
   const reviews = items.filter((item) => item.status === "review_pending").length;
   elements.queueProgressText.textContent = items.length
     ? `${terminal}/${items.length} 个任务已结束${reviews ? ` · ${reviews} 个等待人工确认` : ""}`
@@ -603,8 +682,8 @@ function renderPublication(publication) {
   const validationErrors = (publication.validation || []).filter((item) => item.level === "error");
   const active = ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(publication.status);
   const action = publication.status === "review_pending"
-    ? `<button class="publication-action confirm" data-publication-action="confirm">${publication.platform === "wechat_moments" ? "我已在微信发布" : "确认并发布"}</button>`
-    : ["failed", "cancelled"].includes(publication.status)
+    ? '<button class="publication-action confirm" data-publication-action="confirm">确认并发布</button>'
+    : ["failed", "cancelled", "unpublished"].includes(publication.status)
       ? '<button class="publication-action" data-publication-action="retry">重试</button>'
       : active && publication.status !== "publishing"
         ? '<button class="publication-action subtle" data-publication-action="cancel">取消任务</button>' : "";
@@ -612,7 +691,7 @@ function renderPublication(publication) {
     <div class="publication-heading"><strong>发布 Agent</strong><span class="publication-status ${publication.status}">${publicationStatusLabels[publication.status] || publication.status}</span></div>
     <div class="publication-visibility">可见范围：<strong>${visibilityLabels[publication.visibility] || "公开可见"}</strong></div>
     <p>${escapeHtml(publication.error_message || latestLog?.message || "任务状态已更新")}</p>
-    ${publication.status === "review_pending" ? '<div class="review-callout">请先在平台窗口检查封面、分区、声明和可见范围，再回来确认。</div>' : ""}
+    ${publication.status === "review_pending" ? `<div class="review-callout">${publication.platform === "douyin" ? "Agent 已尝试自动关联 #tag；请在抖音页面从下拉列表确认 @用户，并检查未匹配话题、封面、分区和声明。" : "请在官方页面完成 #tag、@用户、封面、分区和声明，再回来确认。"}</div>` : ""}
     ${validationErrors.length ? `<div class="publication-errors">${validationErrors.map((item) => escapeHtml(item.message)).join("<br>")}</div>` : ""}
     ${publication.platform_url && ["submitted", "published"].includes(publication.status) ? `<a class="publication-link" href="${escapeHtml(publication.platform_url)}" target="_blank" rel="noreferrer">查看平台页面 ↗</a>` : ""}
     <div class="publication-actions">${action}<small>第 ${publication.attempt_count} 次尝试</small></div>`;
@@ -665,7 +744,7 @@ async function savePlatformDraft(showToast = true) {
     }),
   });
   renderPlatformVersion(version);
-  if (showToast) toast("平台发布草稿已保存");
+  if (showToast) toast("平台预填草稿已保存");
   return version;
 }
 
@@ -1024,6 +1103,23 @@ elements.openPlatformButton.addEventListener("click", async () => {
   finally { elements.openPlatformButton.disabled = false; }
 });
 
+elements.copySyncPanel.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-sync-platform]");
+  if (!button) return;
+  const version = state.editorPlatformVersions[button.dataset.syncPlatform];
+  if (!version) return;
+  const platformName = platformLabels[version.platform] || version.platform;
+  const hasDifferentContent = (
+    (elements.title.value || elements.body.value)
+    && (elements.title.value !== version.title || elements.body.value !== version.body)
+  );
+  if (hasDifferentContent && !confirm(`当前标题或正文将被${platformName}文案覆盖，是否继续？`)) return;
+  elements.title.value = version.title;
+  elements.body.value = version.body;
+  elements.bodyCount.textContent = elements.body.value.length;
+  toast(`已填入${platformName}文案，保存内容后生效`);
+});
+
 elements.targetPlatform.addEventListener("change", async () => {
   const nextPlatform = elements.targetPlatform.value;
   elements.targetPlatform.disabled = true;
@@ -1037,6 +1133,7 @@ elements.targetPlatform.addEventListener("change", async () => {
 [elements.platformTitle, elements.platformBody, elements.generationPrompt].forEach((input) => {
   input.addEventListener("input", () => { state.platformDirty = true; });
 });
+elements.platformBody.addEventListener("input", renderInteractiveTokens);
 
 elements.generateCopy.addEventListener("click", async () => {
   if (!state.adapterPost || !state.llmSettings?.has_api_key) return;
@@ -1064,7 +1161,7 @@ elements.savePlatform.addEventListener("click", async () => {
   elements.savePlatform.disabled = true; elements.savePlatform.textContent = "保存中…";
   try { await savePlatformDraft(); }
   catch (error) { toast(error.message, true); }
-  finally { elements.savePlatform.disabled = false; elements.savePlatform.textContent = "保存发布草稿"; }
+  finally { elements.savePlatform.disabled = false; elements.savePlatform.textContent = "保存预填草稿"; }
 });
 
 elements.preparePublish.addEventListener("click", async () => {
@@ -1084,7 +1181,7 @@ elements.preparePublish.addEventListener("click", async () => {
     toast(`发布 Agent 已打开${platformLabels[state.adapterPlatform]}窗口`);
     await loadLatestPublication();
   } catch (error) { toast(error.message, true); }
-  finally { elements.preparePublish.disabled = false; elements.preparePublish.textContent = "准备发布"; }
+  finally { elements.preparePublish.disabled = false; elements.preparePublish.textContent = "保存并打开官方发布页"; }
 });
 
 elements.publicationPanel.addEventListener("click", async (event) => {
@@ -1199,11 +1296,29 @@ elements.queueList.addEventListener("click", async (event) => {
   const publication = state.queuePublications.find((value) => value.id === item.dataset.publicationId);
   if (!publication) return;
   const action = button.dataset.queueAction;
-  if (action === "confirm" && !confirm(`确认发布到${platformLabels[publication.platform] || publication.platform}？请先检查已打开的平台窗口。`)) return;
+  const platformName = platformLabels[publication.platform] || publication.platform;
+  if (action === "confirm" && !confirm(`确认发布到${platformName}？请先检查已打开的平台窗口。`)) return;
+  if (action === "mark-published" && !confirm(`确认将“${publication.post_title || publication.title || "未命名内容"}”标记为已发布？`)) return;
+  if (action === "mark-unpublished" && !confirm(`确认将这条${platformName}记录标记为未发布？`)) return;
+  if (action === "delete" && !confirm("确定永久删除这条发布记录？内容和素材不会被删除。")) return;
   button.disabled = true;
   try {
-    await api(`/api/publications/${publication.id}/${action}`, { method: "POST" });
-    toast(action === "confirm" ? "已确认，发布 Agent 正在提交" : action === "retry" ? "已重新启动发布任务" : "正在取消任务");
+    const path = action === "delete"
+      ? `/api/publications/${publication.id}`
+      : `/api/publications/${publication.id}/${action}`;
+    await api(path, { method: action === "delete" ? "DELETE" : "POST" });
+    if (action === "delete") {
+      state.queueFocusIds = state.queueFocusIds.filter((id) => id !== publication.id);
+    }
+    const messages = {
+      confirm: "已确认，发布 Agent 正在提交",
+      retry: "已重新启动发布任务",
+      cancel: "正在取消任务",
+      "mark-published": "发布记录已标记为发布成功",
+      "mark-unpublished": "发布记录已标记为未发布",
+      delete: "发布记录已删除",
+    };
+    toast(messages[action] || "发布记录已更新");
     await loadPublishQueue();
   } catch (error) { toast(error.message, true); button.disabled = false; }
 });
