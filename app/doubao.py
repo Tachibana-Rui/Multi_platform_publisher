@@ -21,10 +21,12 @@ PLATFORM_NAMES = {
     "bilibili": "B站",
     "kuaishou": "快手",
     "wechat_channels": "视频号",
+    "wechat_moments": "微信朋友圈",
 }
-SYSTEM_PROMPT = """你是专业的跨平台社交媒体文案编辑。根据用户提供的角色、标签和图片，为指定平台生成自然、有辨识度且不过度营销的中文标题和正文。
+SYSTEM_PROMPT = """你是专业的跨平台社交媒体文案编辑。根据用户提供的角色、标签和图片，为指定平台生成自然、有辨识度且不过度营销的中文标题、正文和标签。
 不得虚构图片中无法确认的信息，不添加站外导流，不使用夸大承诺。
-只输出一个 JSON 对象，格式为 {"title":"标题","body":"正文"}，不要输出 Markdown 或额外解释。"""
+必须生成正好 5 个与内容相关、适合目标平台的中文标签。正文 body 中不要自行添加标签。
+只输出一个 JSON 对象，格式为 {"title":"标题","body":"正文","tags":["标签1","标签2","标签3","标签4","标签5"]}，不要输出 Markdown 或额外解释。"""
 
 
 GENERIC_TAGS = {
@@ -70,7 +72,7 @@ def build_generation_prompt(
         return custom_prompt.strip()
     keywords = _content_keywords(post)
     keyword_text = " ".join(keywords) or post.title or "cos作品"
-    return f"生成 {keyword_text} {PLATFORM_NAMES.get(platform, platform)} 标题和文案。"
+    return f"生成 {keyword_text} {PLATFORM_NAMES.get(platform, platform)} 标题和文案，并生成5个相关标签追加在正文末尾。"
 
 
 def _image_data_url(asset: MediaAsset) -> str:
@@ -100,7 +102,11 @@ def build_messages(post: Post, platform: str, assets: list[MediaAsset], prompt: 
     ]
 
 
-def _parse_copy(content: object) -> dict:
+def _parse_copy(
+    content: object,
+    fallback_tags: list[str] | None = None,
+    platform: str | None = None,
+) -> dict:
     if isinstance(content, list):
         content = "".join(
             item.get("text", "") for item in content if isinstance(item, dict)
@@ -118,7 +124,31 @@ def _parse_copy(content: object) -> dict:
     body = str(payload.get("body") or payload.get("caption") or "").strip()
     if not title and not body:
         raise HTTPException(status_code=502, detail="豆包返回的标题和正文均为空")
-    return {"title": title[:300], "body": body[:100_000]}
+    raw_tags = payload.get("tags") or payload.get("hashtags") or []
+    if isinstance(raw_tags, str):
+        raw_tags = re.split(r"[,，\s]+", raw_tags)
+    if not isinstance(raw_tags, list):
+        raw_tags = []
+    candidates = [*raw_tags, *re.findall(r"#([^#\s]+)", body), *(fallback_tags or [])]
+    candidates.extend([
+        PLATFORM_NAMES.get(platform or "", ""), "原创内容", "摄影分享", "内容创作", "生活记录", "灵感分享",
+    ])
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        tag = re.sub(r"\s+", "", str(value).strip().lstrip("#"))[:30]
+        key = tag.casefold()
+        if tag and key not in seen:
+            seen.add(key)
+            tags.append(tag)
+        if len(tags) == 5:
+            break
+    tag_line = " ".join(f"#{tag}" for tag in tags)
+    body_without_trailing_tags = re.sub(r"(?:\s*#[^#\s]+){1,}\s*$", "", body).rstrip()
+    available = max(0, 100_000 - len(tag_line) - (2 if body_without_trailing_tags else 0))
+    body_without_trailing_tags = body_without_trailing_tags[:available].rstrip()
+    body_with_tags = f"{body_without_trailing_tags}\n\n{tag_line}" if body_without_trailing_tags else tag_line
+    return {"title": title[:300], "body": body_with_tags, "tags": tags}
 
 
 async def generate_copy(
@@ -177,4 +207,12 @@ async def generate_copy(
         content = payload["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise HTTPException(status_code=502, detail="豆包 API 返回结构异常") from exc
-    return {**_parse_copy(content), "prompt": prompt, "model": llm["model"]}
+    return {
+        **_parse_copy(
+            content,
+            fallback_tags=[tag.name for tag in post.tags],
+            platform=platform,
+        ),
+        "prompt": prompt,
+        "model": llm["model"],
+    }

@@ -20,15 +20,13 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>
           内容总览
         </button>
-        <button class="nav-item" type="button" disabled title="下一阶段开放">
+        <button class="nav-item" id="platformManagerButton" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Zm7 12 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></svg>
-          平台适配
-          <span class="soon">Soon</span>
+          平台管理
         </button>
-        <button class="nav-item" type="button" disabled title="下一阶段开放">
+        <button class="nav-item" id="publishQueueButton" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg>
           发布队列
-          <span class="soon">Soon</span>
         </button>
       </nav>
 
@@ -120,6 +118,64 @@
         <div class="post-grid" id="postGrid" aria-live="polite"></div>
       </section>
     </main>
+  </div>
+
+  <div class="modal-backdrop" id="platformManagerModal" hidden>
+    <section class="modal management-modal" role="dialog" aria-modal="true" aria-labelledby="platformManagerTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">PUBLISHED LIBRARY</p><h2 id="platformManagerTitle">平台管理</h2></div>
+        <button class="icon-button" id="closePlatformManagerButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="management-body">
+        <div class="management-toolbar">
+          <div><strong>已发布作品</strong><small id="platformManagerSummary">正在读取发布记录…</small></div>
+          <label><span>查看平台</span>
+            <select id="platformManagerFilter">
+              <option value="">全部平台</option>
+              <option value="douyin">抖音</option>
+              <option value="xiaohongshu">小红书</option>
+              <option value="bilibili">B站</option>
+              <option value="wechat_moments">微信朋友圈</option>
+            </select>
+          </label>
+        </div>
+        <div class="published-grid" id="publishedGrid"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="publishQueueModal" hidden>
+    <section class="modal queue-modal" role="dialog" aria-modal="true" aria-labelledby="publishQueueTitle">
+      <header class="modal-header">
+        <div><p class="eyebrow">MULTI-PLATFORM QUEUE</p><h2 id="publishQueueTitle">发布队列</h2></div>
+        <button class="icon-button" id="closePublishQueueButton" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="queue-body">
+        <section class="queue-composer">
+          <div class="library-section-title"><div><strong>创建多平台发布</strong><small>每个平台都会保留独立草稿与人工确认步骤</small></div></div>
+          <label class="field"><span>选择本地内容</span><select id="queuePostSelect"></select></label>
+          <fieldset class="queue-platforms">
+            <legend>目标平台</legend>
+            <label><input type="checkbox" value="douyin" checked><span>抖音</span></label>
+            <label><input type="checkbox" value="xiaohongshu" checked><span>小红书</span></label>
+            <label><input type="checkbox" value="bilibili"><span>B站</span></label>
+            <label><input type="checkbox" value="wechat_moments"><span>微信朋友圈</span></label>
+          </fieldset>
+          <label class="field"><span>谁可以看</span>
+            <select id="queueVisibility"><option value="public">公开可见</option><option value="friends">仅互关好友可见</option><option value="private">仅自己可见</option></select>
+          </label>
+          <button class="primary-button queue-start-button" id="startBatchPublishButton" type="button">加入多平台发布队列</button>
+        </section>
+        <section class="queue-tasks">
+          <div class="queue-progress-card">
+            <div><strong>批量发布进度</strong><span id="queueProgressValue">0%</span></div>
+            <div class="progress-track" role="progressbar" aria-label="批量发布进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="queueProgressBar"></span></div>
+            <small id="queueProgressText">暂无发布任务</small>
+          </div>
+          <div class="queue-list" id="queueList"></div>
+        </section>
+      </div>
+    </section>
   </div>
 
   <div class="modal-backdrop" id="aiConfigModal" hidden>
@@ -227,6 +283,7 @@
                 <option value="douyin">抖音</option>
                 <option value="xiaohongshu">小红书</option>
                 <option value="bilibili">B站</option>
+                <option value="wechat_moments">微信朋友圈</option>
               </select>
             </label>
             <label><span>谁可以看</span>
@@ -312,18 +369,26 @@
   <div class="modal-backdrop" id="importModal" hidden>
     <section class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
       <header class="modal-header">
-        <div><p class="eyebrow">LINK IMPORT</p><h2 id="importModalTitle">导入小红书作品</h2></div>
+        <div><p class="eyebrow">BATCH LINK IMPORT</p><h2 id="importModalTitle">批量导入作品</h2></div>
         <button class="icon-button" id="closeImportButton" type="button" aria-label="关闭">×</button>
       </header>
       <form id="importForm">
         <div class="import-body">
           <div class="import-platform">
-            <span class="xhs-mark">小红书</span>
-            <div><strong>公开作品链接</strong><small>自动提取文案、标签、图片与视频</small></div>
+            <span class="xhs-mark" id="importPlatformMark">小红书</span>
+            <div><strong id="importPlatformName">小红书公开作品</strong><small>自动提取文案、标签、图片与视频</small></div>
           </div>
           <label class="field">
+            <span>来源平台</span>
+            <select id="importPlatform">
+              <option value="xiaohongshu">小红书</option>
+              <option value="douyin">抖音</option>
+            </select>
+          </label>
+          <label class="field">
             <span>作品链接 <b>*</b></span>
-            <textarea id="importUrl" rows="3" required placeholder="粘贴小红书分享链接或包含链接的分享文本…"></textarea>
+            <textarea id="importUrl" rows="7" required placeholder="一次粘贴多个作品链接，使用空格或换行分隔…"></textarea>
+            <small class="field-help">每批最多 30 个链接；单条失败不会影响其他作品。</small>
           </label>
           <label class="rights-check">
             <input id="confirmRights" type="checkbox" required>
@@ -331,14 +396,21 @@
           </label>
           <div class="import-note">
             <span>i</span>
-            <p>仅支持公开可访问的作品。导入期间请保持窗口开启；每个作品的媒体会保存到独立文件夹。</p>
+            <p>仅支持公开可访问或当前账号有权访问的原创作品。每个作品的媒体会保存到独立文件夹。</p>
           </div>
+          <div class="batch-import-progress" id="batchImportProgress" hidden>
+            <div class="progress-track" role="progressbar" aria-label="批量导入进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="batchImportProgressBar"></span>
+            </div>
+            <p id="batchImportProgressText">正在准备导入…</p>
+          </div>
+          <div class="batch-import-results" id="batchImportResults" hidden></div>
         </div>
         <footer class="modal-footer">
           <div></div>
           <div class="footer-actions">
             <button class="secondary-button" id="cancelImportButton" type="button">取消</button>
-            <button class="primary-button" id="startImportButton" type="submit">解析并导入</button>
+            <button class="primary-button" id="startImportButton" type="submit">批量解析并导入</button>
           </div>
         </footer>
       </form>
@@ -430,6 +502,14 @@
         </footer>
       </form>
     </section>
+  </div>
+
+  <div class="image-viewer" id="imageViewer" hidden role="dialog" aria-modal="true" aria-label="图片大图预览">
+    <button class="image-viewer-close" id="closeImageViewerButton" type="button" aria-label="关闭大图">×</button>
+    <div class="image-viewer-content">
+      <img id="imageViewerImage" alt="">
+      <p id="imageViewerCaption"></p>
+    </div>
   </div>
 
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>

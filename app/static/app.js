@@ -15,6 +15,13 @@ const state = {
   accountPollTimer: null,
   browserSyncedContent: null,
   assetMatches: [],
+  importJob: null,
+  importPollTimer: null,
+  publishedPublications: [],
+  queuePosts: [],
+  queuePublications: [],
+  queueFocusIds: [],
+  queuePollTimer: null,
 };
 
 const elements = {
@@ -39,6 +46,13 @@ const elements = {
   importModal: document.querySelector("#importModal"),
   importForm: document.querySelector("#importForm"),
   importUrl: document.querySelector("#importUrl"),
+  importPlatform: document.querySelector("#importPlatform"),
+  importPlatformMark: document.querySelector("#importPlatformMark"),
+  importPlatformName: document.querySelector("#importPlatformName"),
+  batchImportResults: document.querySelector("#batchImportResults"),
+  batchImportProgress: document.querySelector("#batchImportProgress"),
+  batchImportProgressBar: document.querySelector("#batchImportProgressBar"),
+  batchImportProgressText: document.querySelector("#batchImportProgressText"),
   confirmRights: document.querySelector("#confirmRights"),
   startImport: document.querySelector("#startImportButton"),
   libraryModal: document.querySelector("#libraryModal"),
@@ -79,6 +93,21 @@ const elements = {
   savePlatform: document.querySelector("#savePlatformButton"),
   preparePublish: document.querySelector("#preparePublishButton"),
   publicationPanel: document.querySelector("#publicationPanel"),
+  imageViewer: document.querySelector("#imageViewer"),
+  imageViewerImage: document.querySelector("#imageViewerImage"),
+  imageViewerCaption: document.querySelector("#imageViewerCaption"),
+  platformManagerModal: document.querySelector("#platformManagerModal"),
+  platformManagerFilter: document.querySelector("#platformManagerFilter"),
+  platformManagerSummary: document.querySelector("#platformManagerSummary"),
+  publishedGrid: document.querySelector("#publishedGrid"),
+  publishQueueModal: document.querySelector("#publishQueueModal"),
+  queuePostSelect: document.querySelector("#queuePostSelect"),
+  queueVisibility: document.querySelector("#queueVisibility"),
+  startBatchPublish: document.querySelector("#startBatchPublishButton"),
+  queueProgressBar: document.querySelector("#queueProgressBar"),
+  queueProgressValue: document.querySelector("#queueProgressValue"),
+  queueProgressText: document.querySelector("#queueProgressText"),
+  queueList: document.querySelector("#queueList"),
 };
 
 const escapeHtml = (value = "") => String(value)
@@ -219,7 +248,14 @@ function closeEditor() {
 }
 
 function openImport() {
-  elements.importForm.reset();
+  if (!state.importJob || ["completed", "failed"].includes(state.importJob.status)) {
+    elements.importForm.reset();
+    elements.batchImportProgress.hidden = true;
+    elements.batchImportProgressBar.style.width = "0%";
+    elements.batchImportResults.hidden = true;
+    elements.batchImportResults.innerHTML = "";
+  }
+  renderImportPlatform();
   elements.importModal.hidden = false;
   document.body.style.overflow = "hidden";
   window.setTimeout(() => elements.importUrl.focus(), 30);
@@ -342,7 +378,7 @@ function closeAccountManager() {
 
 const platformLabels = {
   douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站",
-  kuaishou: "快手", wechat_channels: "视频号",
+  kuaishou: "快手", wechat_channels: "视频号", wechat_moments: "微信朋友圈",
 };
 
 function selectedPlatformAssetIds() {
@@ -354,7 +390,7 @@ function suggestedPrompt() {
   const count = Math.min([...elements.platformAssets.querySelectorAll("input[data-media='image']")]
     .filter((input) => selected.has(input.value)).length, 4);
   const base = state.platformVersion?.suggested_prompt
-    || `生成 cos作品 ${platformLabels[state.adapterPlatform]} 标题和文案，带有0张图片。`;
+    || `生成 cos作品 ${platformLabels[state.adapterPlatform]} 标题和文案，并生成5个相关标签追加在正文末尾。`;
   return base.replace(/带有\d+张图片/, `带有${count}张图片`);
 }
 
@@ -423,6 +459,123 @@ const publicationStatusLabels = {
   submitted: "已提交平台", published: "发布成功", failed: "发布失败", cancelled: "已取消",
 };
 
+function publicationCover(publication, className) {
+  if (!publication.cover_url) return `<div class="${className}">✦</div>`;
+  if (publication.cover_media_type === "image") {
+    return `<div class="${className}"><img src="${publication.cover_url}" alt="" loading="lazy"></div>`;
+  }
+  return `<div class="${className}"><video src="${publication.cover_url}#t=0.1" muted preload="metadata"></video></div>`;
+}
+
+function renderPublishedWorks() {
+  const platform = elements.platformManagerFilter.value;
+  const items = state.publishedPublications.filter((item) => !platform || item.platform === platform);
+  elements.platformManagerSummary.textContent = items.length
+    ? `共 ${items.length} 份作品，按实际发布时间倒序`
+    : "该平台还没有已发布作品";
+  elements.publishedGrid.innerHTML = items.length ? items.map((item) => `
+    <article class="published-card">
+      ${publicationCover(item, "published-cover")}
+      <div class="published-card-body">
+        <div class="published-card-head"><span class="platform-pill">${platformLabels[item.platform] || item.platform}</span><time>${formatDate(item.published_at || item.updated_at)}</time></div>
+        <h3 title="${escapeHtml(item.title || item.post_title)}">${escapeHtml(item.title || item.post_title || "未命名内容")}</h3>
+        <p>${escapeHtml(item.body || "暂无平台正文")}</p>
+        <div class="published-card-footer"><span>${item.status === "published" ? "发布成功" : "已提交平台"}</span>${item.platform_url ? `<a href="${escapeHtml(item.platform_url)}" target="_blank" rel="noreferrer">查看作品 ↗</a>` : ""}</div>
+      </div>
+    </article>`).join("") : '<div class="library-empty">完成一次平台发布后，作品会按平台出现在这里。</div>';
+}
+
+async function openPlatformManager() {
+  elements.platformManagerModal.hidden = false;
+  document.body.style.overflow = "hidden";
+  const publications = await api("/api/publications");
+  state.publishedPublications = publications.filter((item) => ["published", "submitted"].includes(item.status));
+  renderPublishedWorks();
+}
+
+function closePlatformManager() {
+  elements.platformManagerModal.hidden = true;
+  document.body.style.overflow = "";
+}
+
+function queueActionMarkup(publication) {
+  if (publication.status === "review_pending") {
+    return '<button data-queue-action="confirm">确认发布</button>';
+  }
+  if (["failed", "cancelled"].includes(publication.status)) {
+    return '<button data-queue-action="retry">重试</button>';
+  }
+  if (["pending", "validating", "queued", "awaiting_login", "preparing"].includes(publication.status)) {
+    return '<button data-queue-action="cancel">取消</button>';
+  }
+  return "";
+}
+
+function queueVisiblePublications() {
+  if (state.queueFocusIds.length) {
+    const focus = new Set(state.queueFocusIds);
+    return state.queuePublications.filter((item) => focus.has(item.id));
+  }
+  const active = state.queuePublications.filter((item) =>
+    ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(item.status));
+  return active.length ? active : state.queuePublications.slice(0, 12);
+}
+
+function renderPublishQueue() {
+  const items = queueVisiblePublications();
+  const progress = items.length
+    ? Math.round(items.reduce((sum, item) => sum + (item.progress || 0), 0) / items.length)
+    : 0;
+  elements.queueProgressBar.style.width = `${progress}%`;
+  elements.queueProgressValue.textContent = `${progress}%`;
+  const progressTrack = elements.queueProgressBar.parentElement;
+  progressTrack.setAttribute("aria-valuenow", String(progress));
+  const terminal = items.filter((item) => ["submitted", "published", "failed", "cancelled"].includes(item.status)).length;
+  const reviews = items.filter((item) => item.status === "review_pending").length;
+  elements.queueProgressText.textContent = items.length
+    ? `${terminal}/${items.length} 个任务已结束${reviews ? ` · ${reviews} 个等待人工确认` : ""}`
+    : "暂无发布任务";
+  elements.queueList.innerHTML = items.length ? items.map((item) => {
+    const latestLog = item.logs?.at(-1);
+    return `<article class="queue-item" data-publication-id="${item.id}">
+      ${publicationCover(item, "queue-item-cover")}
+      <div class="queue-item-copy"><strong>${escapeHtml(item.post_title || item.title || "未命名内容")} · ${platformLabels[item.platform] || item.platform}</strong><small>${escapeHtml(item.error_message || latestLog?.message || publicationStatusLabels[item.status] || item.status)}</small><div class="queue-item-progress"><span style="width:${item.progress || 0}%"></span></div></div>
+      <div class="queue-item-side"><span class="publication-status ${item.status}">${publicationStatusLabels[item.status] || item.status}</span><div class="queue-item-actions">${queueActionMarkup(item)}</div></div>
+    </article>`;
+  }).join("") : '<div class="library-empty">选择本地内容和多个平台，即可创建批量发布任务。</div>';
+}
+
+async function loadPublishQueue() {
+  clearTimeout(state.queuePollTimer);
+  state.queuePublications = await api("/api/publications");
+  renderPublishQueue();
+  const items = queueVisiblePublications();
+  if (items.some((item) => ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(item.status))) {
+    state.queuePollTimer = window.setTimeout(
+      () => loadPublishQueue().catch((error) => toast(error.message, true)), 1200,
+    );
+  }
+}
+
+async function openPublishQueue() {
+  elements.publishQueueModal.hidden = false;
+  document.body.style.overflow = "hidden";
+  state.queuePosts = await api("/api/posts");
+  const publishable = state.queuePosts.filter((post) => post.assets.length);
+  elements.queuePostSelect.innerHTML = publishable.length
+    ? publishable.map((post) => `<option value="${post.id}">${escapeHtml(post.title || "未命名内容")} · ${post.assets.length} 个素材</option>`).join("")
+    : '<option value="">请先为内容添加素材</option>';
+  elements.startBatchPublish.disabled = !publishable.length;
+  await loadPublishQueue();
+}
+
+function closePublishQueue() {
+  clearTimeout(state.queuePollTimer);
+  state.queueFocusIds = [];
+  elements.publishQueueModal.hidden = true;
+  document.body.style.overflow = "";
+}
+
 function renderPublication(publication) {
   state.publication = publication;
   if (!publication) {
@@ -450,7 +603,7 @@ function renderPublication(publication) {
   const validationErrors = (publication.validation || []).filter((item) => item.level === "error");
   const active = ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(publication.status);
   const action = publication.status === "review_pending"
-    ? '<button class="publication-action confirm" data-publication-action="confirm">确认并发布</button>'
+    ? `<button class="publication-action confirm" data-publication-action="confirm">${publication.platform === "wechat_moments" ? "我已在微信发布" : "确认并发布"}</button>`
     : ["failed", "cancelled"].includes(publication.status)
       ? '<button class="publication-action" data-publication-action="retry">重试</button>'
       : active && publication.status !== "publishing"
@@ -626,9 +779,16 @@ function renderAssets() {
         <span class="asset-match-status unmatched" title="匹配失败">×</span>`;
     }
 
+    const previewUrl = match?.status === "matched" && match.original_url
+      ? match.original_url : asset.url;
+    const previewLabel = match?.status === "matched" && match.original_url
+      ? `高清原图 · ${match.original_filename || asset.original_name}`
+      : `下载图片 · ${asset.original_name}`;
     return `
       <div class="asset-item">
-        <div class="asset-thumb">${asset.media_type === "image" ? `<img src="${asset.url}" alt="">` : "▶"}</div>
+        ${asset.media_type === "image"
+          ? `<button class="asset-thumb" type="button" data-preview-url="${escapeHtml(previewUrl)}" data-preview-label="${escapeHtml(previewLabel)}" title="点击查看${match?.status === "matched" && match.original_url ? "高清原图" : "下载图片"}"><img src="${asset.url}" alt=""></button>`
+          : '<div class="asset-thumb">▶</div>'}
         <div class="asset-copy"><strong>${escapeHtml(asset.original_name)}</strong><small>${formatBytes(asset.file_size)}${asset.width ? ` · ${asset.width} × ${asset.height}` : ""}</small></div>
         ${matchMarkup}
         <button class="remove-asset" data-asset-id="${asset.id}" type="button" title="删除素材">⌫</button>
@@ -661,6 +821,21 @@ function renderAssets() {
       toast("已确认并复制高清原图");
     } catch (error) { toast(error.message, true); }
   }));
+  elements.assets.querySelectorAll("[data-preview-url]").forEach((button) => button.addEventListener("click", () => {
+    openImageViewer(button.dataset.previewUrl, button.dataset.previewLabel);
+  }));
+}
+
+function openImageViewer(url, caption) {
+  elements.imageViewerImage.src = url;
+  elements.imageViewerImage.alt = caption || "图片预览";
+  elements.imageViewerCaption.textContent = caption || "";
+  elements.imageViewer.hidden = false;
+}
+
+function closeImageViewer() {
+  elements.imageViewer.hidden = true;
+  elements.imageViewerImage.removeAttribute("src");
 }
 
 function renderMatches(matches) {
@@ -740,24 +915,75 @@ elements.deletePost.addEventListener("click", async () => {
 elements.importForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   elements.startImport.disabled = true;
-  elements.startImport.textContent = "正在解析并下载…";
+  elements.startImport.textContent = "正在逐条解析并下载…";
   try {
-    const post = await api("/api/imports/xiaohongshu", {
+    const job = await api("/api/imports/batch-jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: elements.importUrl.value.trim(), confirm_rights: elements.confirmRights.checked }),
+      body: JSON.stringify({
+        platform: elements.importPlatform.value,
+        text: elements.importUrl.value.trim(),
+        confirm_rights: elements.confirmRights.checked,
+      }),
     });
-    closeImport();
-    await Promise.all([loadPosts(), loadDashboard()]);
-    toast(`已导入《${post.title}》，共 ${post.assets.length} 个素材`);
-    openEditor(post);
+    state.importJob = job;
+    renderImportJob(job);
+    await pollImportJob(job.id);
   } catch (error) {
     toast(error.message, true);
-  } finally {
     elements.startImport.disabled = false;
-    elements.startImport.textContent = "解析并导入";
+    elements.startImport.textContent = "批量解析并导入";
   }
 });
+
+function renderImportJob(job) {
+  state.importJob = job;
+  elements.batchImportProgress.hidden = false;
+  elements.batchImportProgressBar.style.width = `${job.progress || 0}%`;
+  const track = elements.batchImportProgress.querySelector(".progress-track");
+  track.setAttribute("aria-valuenow", String(Math.round(job.progress || 0)));
+  const current = job.current_index || 0;
+  const name = job.current_name || "等待开始";
+  elements.batchImportProgressText.textContent = `${name} 第[${current}]/[${job.total}]条，图片已下载 第[${job.image_downloaded || 0}]/[${job.image_total || 0}]张。`;
+  elements.batchImportResults.hidden = !(job.results?.length || job.status === "failed");
+  elements.batchImportResults.innerHTML = `
+    <div class="batch-result-summary">成功 ${job.imported || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}</div>
+    ${(job.results || []).map((item) => `<div class="batch-result-item ${item.status}">
+      <span>${item.status === "imported" ? "✓" : item.status === "skipped" ? "—" : "×"}</span>
+      <div><strong>${escapeHtml(item.post?.title || item.url)}</strong><small>${escapeHtml(item.error || `${item.post?.assets?.length || 0} 个素材`)}</small></div>
+    </div>`).join("")}
+    ${job.error ? `<div class="batch-result-item failed"><span>×</span><div><strong>批次中断</strong><small>${escapeHtml(job.error)}</small></div></div>` : ""}`;
+}
+
+async function pollImportJob(jobId) {
+  clearTimeout(state.importPollTimer);
+  const job = await api(`/api/imports/batch-jobs/${jobId}`);
+  renderImportJob(job);
+  if (["completed", "failed"].includes(job.status)) {
+    elements.startImport.disabled = false;
+    elements.startImport.textContent = "批量解析并导入";
+    await Promise.all([loadPosts(), loadDashboard()]);
+    toast(job.status === "completed"
+      ? `批量导入完成：成功 ${job.imported}，失败 ${job.failed}`
+      : `批量导入中断：${job.error || "未知错误"}`, job.status === "failed");
+    return;
+  }
+  state.importPollTimer = window.setTimeout(
+    () => pollImportJob(jobId).catch((error) => toast(error.message, true)), 500,
+  );
+}
+
+function renderImportPlatform() {
+  const douyin = elements.importPlatform.value === "douyin";
+  elements.importPlatformMark.textContent = douyin ? "抖音" : "小红书";
+  elements.importPlatformMark.classList.toggle("douyin", douyin);
+  elements.importPlatformName.textContent = douyin ? "抖音公开作品" : "小红书公开作品";
+  elements.importUrl.placeholder = douyin
+    ? "粘贴多个抖音作品链接，使用空格或换行分隔…"
+    : "粘贴多个小红书作品链接，使用空格或换行分隔…";
+}
+
+elements.importPlatform.addEventListener("change", renderImportPlatform);
 
 elements.aiConfigForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -935,7 +1161,61 @@ elements.manualMatchButton.addEventListener("click", async () => {
   }
 });
 
+elements.startBatchPublish.addEventListener("click", async () => {
+  const platforms = [...document.querySelectorAll(".queue-platforms input:checked")]
+    .map((input) => input.value);
+  if (!elements.queuePostSelect.value) return toast("请先选择包含素材的本地内容", true);
+  if (!platforms.length) return toast("请至少选择一个目标平台", true);
+  elements.startBatchPublish.disabled = true;
+  elements.startBatchPublish.textContent = "正在创建发布任务…";
+  try {
+    const result = await api("/api/publications/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        post_id: elements.queuePostSelect.value,
+        platforms,
+        visibility: elements.queueVisibility.value,
+      }),
+    });
+    state.queueFocusIds = result.created.map((item) => item.id);
+    if (result.created.length) {
+      toast(`已创建 ${result.created.length} 个平台发布任务${result.skipped.length ? `，跳过 ${result.skipped.length} 个进行中任务` : ""}`);
+    } else {
+      toast("所选平台已有进行中的发布任务", true);
+    }
+    await loadPublishQueue();
+  } catch (error) { toast(error.message, true); }
+  finally {
+    elements.startBatchPublish.disabled = false;
+    elements.startBatchPublish.textContent = "加入多平台发布队列";
+  }
+});
+
+elements.queueList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-queue-action]");
+  const item = event.target.closest("[data-publication-id]");
+  if (!button || !item) return;
+  const publication = state.queuePublications.find((value) => value.id === item.dataset.publicationId);
+  if (!publication) return;
+  const action = button.dataset.queueAction;
+  if (action === "confirm" && !confirm(`确认发布到${platformLabels[publication.platform] || publication.platform}？请先检查已打开的平台窗口。`)) return;
+  button.disabled = true;
+  try {
+    await api(`/api/publications/${publication.id}/${action}`, { method: "POST" });
+    toast(action === "confirm" ? "已确认，发布 Agent 正在提交" : action === "retry" ? "已重新启动发布任务" : "正在取消任务");
+    await loadPublishQueue();
+  } catch (error) { toast(error.message, true); button.disabled = false; }
+});
+
 document.querySelector("#newPostButton").addEventListener("click", () => openEditor());
+document.querySelector("#platformManagerButton").addEventListener("click", () => openPlatformManager().catch((error) => toast(error.message, true)));
+document.querySelector("#closePlatformManagerButton").addEventListener("click", closePlatformManager);
+elements.platformManagerModal.addEventListener("click", (event) => { if (event.target === elements.platformManagerModal) closePlatformManager(); });
+elements.platformManagerFilter.addEventListener("change", renderPublishedWorks);
+document.querySelector("#publishQueueButton").addEventListener("click", () => openPublishQueue().catch((error) => toast(error.message, true)));
+document.querySelector("#closePublishQueueButton").addEventListener("click", closePublishQueue);
+elements.publishQueueModal.addEventListener("click", (event) => { if (event.target === elements.publishQueueModal) closePublishQueue(); });
 document.querySelector("#storageSettingsButton").addEventListener("click", () => openStorageSettings().catch((error) => toast(error.message, true)));
 document.querySelector("#closeStorageButton").addEventListener("click", closeStorageSettings);
 document.querySelector("#cancelStorageButton").addEventListener("click", closeStorageSettings);
@@ -997,6 +1277,8 @@ elements.importModal.addEventListener("click", (event) => { if (event.target ===
 document.querySelector("#closeModalButton").addEventListener("click", closeEditor);
 document.querySelector("#cancelButton").addEventListener("click", closeEditor);
 elements.modal.addEventListener("click", (event) => { if (event.target === elements.modal) closeEditor(); });
+document.querySelector("#closeImageViewerButton").addEventListener("click", closeImageViewer);
+elements.imageViewer.addEventListener("click", (event) => { if (event.target === elements.imageViewer) closeImageViewer(); });
 elements.body.addEventListener("input", () => { elements.bodyCount.textContent = elements.body.value.length; });
 elements.fileInput.addEventListener("change", () => addFiles(elements.fileInput.files));
 elements.dropzone.addEventListener("dragover", (event) => { event.preventDefault(); elements.dropzone.classList.add("dragging"); });
@@ -1006,7 +1288,10 @@ elements.dropzone.addEventListener("drop", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!elements.storageModal.hidden) closeStorageSettings();
+  if (!elements.imageViewer.hidden) closeImageViewer();
+  else if (!elements.publishQueueModal.hidden) closePublishQueue();
+  else if (!elements.platformManagerModal.hidden) closePlatformManager();
+  else if (!elements.storageModal.hidden) closeStorageSettings();
   else if (!elements.accountModal.hidden) closeAccountManager();
   else if (!elements.aiConfigModal.hidden) closeAiConfig();
   else if (!elements.platformModal.hidden) attemptClosePlatform();

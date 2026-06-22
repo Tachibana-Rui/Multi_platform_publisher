@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 import hashlib
 import json
 import mimetypes
@@ -286,7 +287,11 @@ async def _download_media(
     raise HTTPException(status_code=422, detail="媒体地址跳转次数过多")
 
 
-async def import_public_note(source_url: str, post_id: str) -> tuple[str, ParsedNote, list[dict]]:
+async def import_public_note(
+    source_url: str,
+    post_id: str,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> tuple[str, ParsedNote, list[dict]]:
     source_url = normalize_source_url(source_url)
     headers = {
         "User-Agent": USER_AGENT,
@@ -300,6 +305,14 @@ async def import_public_note(source_url: str, post_id: str) -> tuple[str, Parsed
         async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(45.0)) as client:
             canonical_url, html = await _fetch_page(client, source_url)
             note = parse_note_page(html, canonical_url)
+            image_total = sum(source.media_type == "image" for source in note.media)
+            image_downloaded = 0
+            if progress_callback:
+                progress_callback({
+                    "post_name": note.title,
+                    "image_downloaded": image_downloaded,
+                    "image_total": image_total,
+                })
             assets: list[dict] = []
             for position, source in enumerate(note.media, start=1):
                 details, path = await _download_media(client, source, target_dir, position, canonical_url)
@@ -308,6 +321,14 @@ async def import_public_note(source_url: str, post_id: str) -> tuple[str, Parsed
                     raise HTTPException(status_code=413, detail="作品媒体文件总大小超过导入限制")
                 details["storage_name"] = f"{post_id}/{path.name}"
                 assets.append(details)
+                if source.media_type == "image":
+                    image_downloaded += 1
+                if progress_callback:
+                    progress_callback({
+                        "post_name": note.title,
+                        "image_downloaded": image_downloaded,
+                        "image_total": image_total,
+                    })
             return canonical_url, note, assets
     except Exception:
         shutil.rmtree(target_dir, ignore_errors=True)

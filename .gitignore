@@ -7,5 +7,6 @@ data/*.db-*
 data/browser_profiles/
 data/llm_settings.json
 data/llm_settings.tmp
+data/wechat_moments/
 storage/uploads/*
 !storage/uploads/.gitkeep

@@ -17,7 +17,8 @@ PUBLISH_URLS = {
     "bilibili_dynamic": "https://t.bilibili.com/",
 }
 PLATFORM_BROWSER_LOCKS = {
-    platform: threading.Lock() for platform in ("douyin", "xiaohongshu", "bilibili")
+    platform: threading.Lock()
+    for platform in ("douyin", "xiaohongshu", "bilibili", "wechat_moments")
 }
 VISIBILITY_LABELS = {
     "public": ("公开可见", "所有人可见", "公开"),

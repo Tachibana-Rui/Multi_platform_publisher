@@ -1,4 +1,5 @@
 import io
+import atexit
 import os
 from pathlib import Path
 import tempfile
@@ -8,15 +9,23 @@ from PIL import Image, ImageDraw
 
 
 _temp_dir = tempfile.TemporaryDirectory()
-os.environ.setdefault("CONTENT_HUB_DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault(
+    "CONTENT_HUB_DATABASE_URL",
+    f"sqlite:///{(Path(_temp_dir.name) / 'test.db').as_posix()}",
+)
 os.environ.setdefault("CONTENT_HUB_DATA_DIR", os.path.join(_temp_dir.name, "data"))
 os.environ.setdefault("CONTENT_HUB_UPLOAD_DIR", os.path.join(_temp_dir.name, "uploads"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.database import engine  # noqa: E402
 from app.content_matcher import parse_structured_folder  # noqa: E402
 from app.xiaohongshu import normalize_source_url, parse_note_page  # noqa: E402
+from app.douyin_importer import ParsedDouyinPost, normalize_douyin_url  # noqa: E402
+from app.xiaohongshu import ParsedNote  # noqa: E402
+
+atexit.register(engine.dispose)
 
 
 def make_png() -> bytes:
@@ -269,7 +278,7 @@ def test_platform_version_copies_source_and_can_regenerate(monkeypatch):
         assert version_data["body"] == "原始正文"
         assert version_data["content_source"] == "copied"
         assert version_data["selected_asset_ids"] == [uploaded["assets"][0]["id"]]
-        assert version_data["suggested_prompt"] == "生成 NIKKE 艾德 cos 抖音 标题和文案。"
+        assert version_data["suggested_prompt"] == "生成 NIKKE 艾德 cos 抖音 标题和文案，并生成5个相关标签追加在正文末尾。"
 
         first = client.post(
             f"/api/posts/{post['id']}/platform-versions/douyin/generate",
@@ -402,7 +411,8 @@ def test_account_management_status_check_and_login(monkeypatch):
 
 
 def test_manual_folder_match_bypasses_tag_routing():
-    manual_folder = Path(_temp_dir.name) / "manual-originals"
+    manual_library = Path(_temp_dir.name) / "manual-library"
+    manual_folder = manual_library / "manual-originals"
     manual_folder.mkdir(parents=True, exist_ok=True)
     original_path = manual_folder / "manual-source.jpg"
     original = Image.new("RGB", (900, 1200), "#d8c8ba")
@@ -414,6 +424,9 @@ def test_manual_folder_match_bypasses_tag_routing():
     original.resize((450, 600), Image.Resampling.LANCZOS).save(compressed, "JPEG", quality=65)
 
     with TestClient(app) as client:
+        root = client.post("/api/library/roots", json={"path": str(manual_library)}).json()
+        client.post(f"/api/library/roots/{root['id']}/scan")
+        assert wait_for_scan(client, root["id"])["assets"] == 1
         post = client.post(
             "/api/posts", json={"title": "手动匹配", "tags": ["完全不相关角色"]}
         ).json()
@@ -455,3 +468,170 @@ def test_storage_location_can_be_changed_without_breaking_media(monkeypatch):
         served = client.get("/media/storage-test/sample.bin")
         assert served.status_code == 200
         assert served.content == b"content-hub-storage"
+
+
+def _fake_import_asset(post_id: str) -> list[dict]:
+    from app.config import settings
+
+    target = settings.upload_dir / post_id
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / "import.png"
+    path.write_bytes(make_png())
+    return [{
+        "original_name": "import.png",
+        "storage_name": f"{post_id}/import.png",
+        "media_type": "image",
+        "mime_type": "image/png",
+        "file_size": path.stat().st_size,
+        "checksum": "a" * 64,
+        "width": 32,
+        "height": 24,
+        "duration_seconds": None,
+        "position": 0,
+    }]
+
+
+def test_batch_xiaohongshu_import_accepts_spaces_newlines_and_duplicates(monkeypatch):
+    async def fake_import(url, post_id):
+        note_id = url.rsplit("/", 1)[-1]
+        return url, ParsedNote(note_id, f"笔记 {note_id}", "正文", ["批量"], []), _fake_import_asset(post_id)
+
+    monkeypatch.setattr("app.main.import_public_note", fake_import)
+    first = "https://www.xiaohongshu.com/explore/6411cf99000000001300b6d9"
+    second = "https://www.xiaohongshu.com/explore/6411cf99000000001300b6da"
+    with TestClient(app) as client:
+        response = client.post("/api/imports/batch", json={
+            "platform": "xiaohongshu",
+            "text": f"{first}  {second}\n{first}",
+            "confirm_rights": True,
+        })
+        assert response.status_code == 207
+        payload = response.json()
+        assert payload["imported"] == 2
+        assert payload["skipped"] == 1
+        assert payload["failed"] == 0
+
+
+def test_batch_douyin_import_keeps_success_when_another_link_fails(monkeypatch):
+    async def fake_import(url, post_id):
+        if url.endswith("2"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="模拟无法解析")
+        return url, ParsedDouyinPost("1", "抖音作品", "抖音正文", ["抖音"]), _fake_import_asset(post_id)
+
+    monkeypatch.setattr("app.main.import_public_douyin", fake_import)
+    assert normalize_douyin_url("复制 https://v.douyin.com/example/ 看看") == "https://v.douyin.com/example/"
+    with TestClient(app) as client:
+        response = client.post("/api/imports/batch", json={
+            "platform": "douyin",
+            "text": "https://www.douyin.com/video/1\nhttps://www.douyin.com/video/2",
+            "confirm_rights": True,
+        })
+        assert response.status_code == 207
+        payload = response.json()
+        assert payload["imported"] == 1
+        assert payload["failed"] == 1
+        assert len(client.get("/api/posts", params={"search": "抖音作品"}).json()) == 1
+
+
+def test_wechat_moments_platform_version_and_publication(monkeypatch):
+    monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "朋友圈标题", "body": "朋友圈正文"}).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[("files", ("moment.png", make_png(), "image/png"))],
+        ).json()
+        version = client.get(
+            f"/api/posts/{post['id']}/platform-versions/wechat_moments"
+        )
+        assert version.status_code == 200
+        created = client.post("/api/publications", json={
+            "post_id": post["id"], "platform": "wechat_moments", "visibility": "friends",
+        })
+        assert created.status_code == 201
+        assert created.json()["platform"] == "wechat_moments"
+
+
+def test_batch_import_job_reports_post_and_image_progress(monkeypatch):
+    async def fake_import(url, post_id, progress_callback=None):
+        if progress_callback:
+            progress_callback({"post_name": "进度测试作品", "image_downloaded": 0, "image_total": 1})
+        assets = _fake_import_asset(post_id)
+        if progress_callback:
+            progress_callback({"post_name": "进度测试作品", "image_downloaded": 1, "image_total": 1})
+        return url, ParsedNote("progress-note", "进度测试作品", "正文", ["进度"], []), assets
+
+    monkeypatch.setattr("app.main.import_public_note", fake_import)
+    with TestClient(app) as client:
+        created = client.post("/api/imports/batch-jobs", json={
+            "platform": "xiaohongshu",
+            "text": "https://www.xiaohongshu.com/explore/progress0001",
+            "confirm_rights": True,
+        })
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            job = client.get(f"/api/imports/batch-jobs/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        assert job["status"] == "completed"
+        assert job["current_name"] == "进度测试作品"
+        assert job["current_index"] == 1
+        assert job["image_downloaded"] == 1
+        assert job["image_total"] == 1
+        assert job["progress"] == 100
+
+
+def test_multi_platform_batch_publication_and_published_metadata(monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        "app.main.publication_agent.start",
+        lambda publication_id: started.append(publication_id) or True,
+    )
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "多平台批量发布", "body": "批量正文"}).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[("files", ("batch-publish.png", make_png(), "image/png"))],
+        ).json()
+        response = client.post("/api/publications/batch", json={
+            "post_id": post["id"],
+            "platforms": ["douyin", "xiaohongshu", "bilibili"],
+            "visibility": "private",
+        })
+        assert response.status_code == 207
+        publications = response.json()["created"]
+        assert len(publications) == 3
+        assert len(started) == 3
+        assert {item["platform"] for item in publications} == {"douyin", "xiaohongshu", "bilibili"}
+        assert all(item["progress"] == 5 for item in publications)
+        assert all(item["post_title"] == "多平台批量发布" for item in publications)
+        assert all(item["cover_url"] == post["assets"][0]["url"] for item in publications)
+
+        from app.database import SessionLocal
+        from app.models import PlatformPublication
+
+        with SessionLocal() as db:
+            published = db.get(PlatformPublication, publications[0]["id"])
+            published.status = "published"
+            published.published_at = publication_time = published.updated_at
+            db.commit()
+        listing = client.get("/api/publications", params={"status": "published"}).json()
+        record = next(item for item in listing if item["id"] == publications[0]["id"])
+        assert record["post_title"] == "多平台批量发布"
+        assert record["progress"] == 100
+        assert record["published_at"] is not None
+
+
+def test_doubao_copy_appends_exactly_five_tags():
+    from app.doubao import _parse_copy
+
+    result = _parse_copy(
+        '{"title":"夜景人像","body":"今晚的光影很温柔。","tags":["夜景人像","城市摄影","氛围感","夜拍","摄影分享"]}',
+        platform="douyin",
+    )
+    assert result["tags"] == ["夜景人像", "城市摄影", "氛围感", "夜拍", "摄影分享"]
+    assert result["body"].endswith("#夜景人像 #城市摄影 #氛围感 #夜拍 #摄影分享")

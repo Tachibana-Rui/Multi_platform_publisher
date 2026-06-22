@@ -309,11 +309,16 @@ def match_post_images(
     coser_name: str | None = None,
     character_name: str | None = None,
     shoot_date: str | None = None,
+    candidate_originals: list[OriginalAsset] | None = None,
 ) -> dict:
-    folders = select_candidate_folders(
-        db, post, source_root_id, coser_name, character_name, shoot_date
-    )
-    originals = [asset for folder in folders for asset in folder.assets]
+    if candidate_originals is None:
+        folders = select_candidate_folders(
+            db, post, source_root_id, coser_name, character_name, shoot_date
+        )
+        originals = [asset for folder in folders for asset in folder.assets]
+    else:
+        originals = candidate_originals
+        folders = list({asset.folder_id: asset.folder for asset in originals}.values())
     downloaded = [asset for asset in post.assets if asset.media_type == "image"]
     if not downloaded:
         raise HTTPException(status_code=422, detail="该内容没有可匹配的图片")
@@ -404,11 +409,45 @@ def match_post_images(
 
 def match_post_images_in_folder(db: Session, post: Post, path_value: str) -> dict:
     path = Path(path_value).expanduser().resolve()
-    root = add_source_root(db, str(path), f"手动匹配 · {path.name or '原图目录'}")
-    scan = scan_source_root(db, root)
-    result = match_post_images(db, post, source_root_id=root.id)
+    if not path.is_dir():
+        raise HTTPException(status_code=422, detail="指定的原图目录不存在或不是文件夹")
+
+    indexed_assets = list(db.scalars(select(OriginalAsset)).all())
+    originals = []
+    for asset in indexed_assets:
+        try:
+            if Path(asset.path).resolve().is_relative_to(path):
+                originals.append(asset)
+        except (OSError, ValueError):
+            continue
+
+    scan = None
+    if not originals:
+        roots = list(db.scalars(select(SourceRoot)).all())
+        covering = []
+        for root in roots:
+            try:
+                root_path = Path(root.path).resolve()
+                if path.is_relative_to(root_path):
+                    covering.append((len(root_path.parts), root))
+            except (OSError, ValueError):
+                continue
+        if covering:
+            root = max(covering, key=lambda item: item[0])[1]
+        else:
+            root = add_source_root(db, str(path), f"手动匹配 · {path.name or '原图目录'}")
+        scan = scan_source_root(db, root)
+        indexed_assets = list(db.scalars(select(OriginalAsset)).all())
+        for asset in indexed_assets:
+            try:
+                if Path(asset.path).resolve().is_relative_to(path):
+                    originals.append(asset)
+            except (OSError, ValueError):
+                continue
+
+    result = match_post_images(db, post, candidate_originals=originals)
     result["manual_folder"] = str(path)
-    result["scan"] = scan
+    result["scan"] = scan or {"indexed": 0, "skipped": len(originals), "reused": True}
     return result
 
 

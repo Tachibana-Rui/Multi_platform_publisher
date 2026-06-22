@@ -100,6 +100,15 @@ class XiaohongshuImportRequest(BaseModel):
     confirm_rights: bool
 
 
+ImportPlatform = Literal["xiaohongshu", "douyin"]
+
+
+class BatchImportRequest(BaseModel):
+    platform: ImportPlatform
+    text: str = Field(min_length=10, max_length=50_000)
+    confirm_rights: bool
+
+
 class SourceRootCreate(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     name: str | None = Field(default=None, max_length=100)
@@ -120,7 +129,9 @@ class StorageSettingsUpdate(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
 
 
-PlatformName = Literal["douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels"]
+PlatformName = Literal[
+    "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels", "wechat_moments"
+]
 
 
 class LLMSettingsUpdate(BaseModel):
@@ -140,7 +151,7 @@ class GenerateCopyRequest(BaseModel):
     custom_prompt: str | None = Field(default=None, max_length=4000)
 
 
-PublishPlatform = Literal["douyin", "xiaohongshu", "bilibili"]
+PublishPlatform = Literal["douyin", "xiaohongshu", "bilibili", "wechat_moments"]
 PublicationVisibility = Literal["public", "friends", "private"]
 
 
@@ -148,3 +159,14 @@ class PublicationCreate(BaseModel):
     post_id: str
     platform: PublishPlatform
     visibility: PublicationVisibility = "public"
+
+
+class PublicationBatchCreate(BaseModel):
+    post_id: str
+    platforms: list[PublishPlatform] = Field(min_length=1, max_length=4)
+    visibility: PublicationVisibility = "public"
+
+    @field_validator("platforms")
+    @classmethod
+    def unique_platforms(cls, values: list[PublishPlatform]) -> list[PublishPlatform]:
+        return list(dict.fromkeys(values))

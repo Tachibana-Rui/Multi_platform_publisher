@@ -18,6 +18,19 @@ from .publishers.base import PublicationCancelled, PublishAsset, PublishSnapshot
 ACTIVE_STATUSES = {
     "pending", "queued", "validating", "awaiting_login", "preparing", "review_pending", "publishing"
 }
+PUBLICATION_PROGRESS = {
+    "pending": 5,
+    "validating": 15,
+    "queued": 20,
+    "awaiting_login": 35,
+    "preparing": 55,
+    "review_pending": 75,
+    "publishing": 90,
+    "submitted": 100,
+    "published": 100,
+    "failed": 100,
+    "cancelled": 100,
+}
 
 
 def _now() -> datetime:
@@ -33,6 +46,10 @@ def _json_list(value: str | None) -> list:
 
 
 def serialize_publication(publication: PlatformPublication) -> dict:
+    post = publication.post
+    asset_ids = [str(value) for value in _json_list(publication.asset_ids_json)]
+    asset_map = {asset.id: asset for asset in post.assets} if post else {}
+    cover_asset = next((asset_map.get(asset_id) for asset_id in asset_ids if asset_map.get(asset_id)), None)
     return {
         "id": publication.id,
         "post_id": publication.post_id,
@@ -40,7 +57,7 @@ def serialize_publication(publication: PlatformPublication) -> dict:
         "visibility": publication.visibility,
         "title": publication.title,
         "body": publication.body,
-        "asset_ids": [str(value) for value in _json_list(publication.asset_ids_json)],
+        "asset_ids": asset_ids,
         "status": publication.status,
         "validation": _json_list(publication.validation_json),
         "logs": _json_list(publication.logs_json),
@@ -52,6 +69,12 @@ def serialize_publication(publication: PlatformPublication) -> dict:
         "published_at": publication.published_at,
         "created_at": publication.created_at,
         "updated_at": publication.updated_at,
+        "progress": PUBLICATION_PROGRESS.get(publication.status, 0),
+        "post_title": post.title if post else publication.title,
+        "post_tags": [tag.name for tag in post.tags] if post else [],
+        "content_type": post.content_type if post else None,
+        "cover_url": f"/media/{cover_asset.storage_name}" if cover_asset else None,
+        "cover_media_type": cover_asset.media_type if cover_asset else None,
     }
 
 

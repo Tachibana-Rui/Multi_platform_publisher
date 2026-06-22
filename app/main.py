@@ -1,7 +1,13 @@
 from contextlib import asynccontextmanager
+import asyncio
+from copy import deepcopy
+from collections.abc import Callable
+import inspect
 import json
 from pathlib import Path
+import re
 import shutil
+import threading
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -13,7 +19,7 @@ from sqlalchemy.orm import Session
 from .assets import save_upload
 from .account_manager import ACCOUNT_PLATFORMS, account_manager
 from .config import ROOT_DIR, settings
-from .database import get_db, init_db
+from .database import SessionLocal, get_db, init_db
 from .library_tasks import get_scan_state, is_scanning, schedule_scan
 from .content_matcher import (
     add_source_root,
@@ -28,6 +34,7 @@ from .models import (
 )
 from .publish_agent import ACTIVE_STATUSES, publication_agent, serialize_publication
 from .doubao import generate_copy
+from .douyin_importer import import_public_douyin, normalize_douyin_url
 from .llm_settings import get_public_settings, update_settings
 from .platform_adapter import (
     get_or_create_version,
@@ -38,6 +45,7 @@ from .platform_adapter import (
 )
 from .schemas import (
     DashboardResponse,
+    BatchImportRequest,
     PostCreate,
     PostResponse,
     PostUpdate,
@@ -45,6 +53,7 @@ from .schemas import (
     ManualMatchRequest,
     GenerateCopyRequest,
     LLMSettingsUpdate,
+    PublicationBatchCreate,
     PublicationCreate,
     PlatformVersionUpdate,
     SourceRootCreate,
@@ -352,12 +361,32 @@ async def import_xiaohongshu(
 ) -> dict:
     if not payload.confirm_rights:
         raise HTTPException(status_code=422, detail="请确认该作品由你原创或已获得导入授权")
-    submitted_url = normalize_source_url(payload.url)
+    return await import_one_post(db, "xiaohongshu", payload.url)
+
+
+async def import_one_post(
+    db: Session,
+    platform: str,
+    source_text: str,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> dict:
+    normalizer = normalize_source_url if platform == "xiaohongshu" else normalize_douyin_url
+    submitted_url = normalizer(source_text)
     if db.scalar(select(Post).where(Post.source_url == submitted_url)):
         raise HTTPException(status_code=409, detail="该作品已经导入 Content Hub")
 
     post_id = str(uuid4())
-    canonical_url, note, asset_values = await import_public_note(submitted_url, post_id)
+    importer = import_public_note if platform == "xiaohongshu" else import_public_douyin
+    parameters = inspect.signature(importer).parameters
+    supports_progress = "progress_callback" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if progress_callback and supports_progress:
+        canonical_url, note, asset_values = await importer(
+            submitted_url, post_id, progress_callback=progress_callback
+        )
+    else:
+        canonical_url, note, asset_values = await importer(submitted_url, post_id)
     if db.scalar(select(Post).where(Post.source_url == canonical_url)):
         shutil.rmtree(settings.upload_dir / post_id, ignore_errors=True)
         raise HTTPException(status_code=409, detail="该作品已经导入 Content Hub")
@@ -372,7 +401,7 @@ async def import_xiaohongshu(
         id=post_id,
         title=note.title,
         body=note.body,
-        source_platform="xiaohongshu",
+        source_platform=platform,
         source_url=canonical_url,
         content_type=content_type,
         status="draft",
@@ -388,6 +417,184 @@ async def import_xiaohongshu(
         db.rollback()
         shutil.rmtree(settings.upload_dir / post_id, ignore_errors=True)
         raise
+
+
+def extract_batch_urls(payload: BatchImportRequest) -> list[str]:
+    if not payload.confirm_rights:
+        raise HTTPException(status_code=422, detail="请确认这些作品由你原创或已获得导入授权")
+    urls = re.findall(r"https?://[^\s<>\"']+", payload.text)
+    if not urls:
+        raise HTTPException(status_code=422, detail="没有找到有效链接")
+    if len(urls) > 30:
+        raise HTTPException(status_code=422, detail="每次最多批量导入 30 个链接")
+    return urls
+
+
+async def process_batch_import(
+    payload: BatchImportRequest,
+    db: Session,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> dict:
+    urls = extract_batch_urls(payload)
+
+    results = []
+    seen: set[str] = set()
+    for current_index, raw_url in enumerate(urls, start=1):
+        if progress_callback:
+            progress_callback({
+                "status": "running",
+                "current_index": current_index,
+                "current_name": raw_url,
+                "image_downloaded": 0,
+                "image_total": 0,
+            })
+        try:
+            normalizer = normalize_source_url if payload.platform == "xiaohongshu" else normalize_douyin_url
+            normalized = normalizer(raw_url)
+            if normalized in seen:
+                results.append({
+                    "url": normalized, "status": "skipped", "error": "本批次中的重复链接",
+                })
+                if progress_callback:
+                    progress_callback({"results": deepcopy(results), "item_complete": True})
+                continue
+            seen.add(normalized)
+            def report_post(update: dict) -> None:
+                if progress_callback:
+                    progress_callback({
+                        "current_index": current_index,
+                        "current_name": update.get("post_name") or normalized,
+                        "image_downloaded": int(update.get("image_downloaded") or 0),
+                        "image_total": int(update.get("image_total") or 0),
+                    })
+
+            post = await import_one_post(
+                db, payload.platform, normalized, progress_callback=report_post
+            )
+            results.append({"url": normalized, "status": "imported", "post": post})
+        except HTTPException as exc:
+            db.rollback()
+            results.append({
+                "url": raw_url,
+                "status": "failed" if exc.status_code != 409 else "skipped",
+                "error": str(exc.detail),
+                "status_code": exc.status_code,
+            })
+        except Exception as exc:
+            db.rollback()
+            results.append({"url": raw_url, "status": "failed", "error": str(exc)[:500]})
+        if progress_callback:
+            progress_callback({"results": deepcopy(results), "item_complete": True})
+    return {
+        "platform": payload.platform,
+        "total": len(results),
+        "imported": sum(item["status"] == "imported" for item in results),
+        "skipped": sum(item["status"] == "skipped" for item in results),
+        "failed": sum(item["status"] == "failed" for item in results),
+        "results": results,
+    }
+
+
+@app.post("/api/imports/batch", status_code=207)
+async def import_links_batch(
+    payload: BatchImportRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    return await process_batch_import(payload, db)
+
+
+_IMPORT_JOBS: dict[str, dict] = {}
+_IMPORT_JOBS_LOCK = threading.RLock()
+
+
+def update_import_job(job_id: str, values: dict) -> None:
+    with _IMPORT_JOBS_LOCK:
+        job = _IMPORT_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(values)
+        results = job.get("results", [])
+        job["imported"] = sum(item.get("status") == "imported" for item in results)
+        job["skipped"] = sum(item.get("status") == "skipped" for item in results)
+        job["failed"] = sum(item.get("status") == "failed" for item in results)
+        total = max(int(job.get("total") or 0), 1)
+        completed = len(results)
+        current_total = int(job.get("image_total") or 0)
+        current_done = int(job.get("image_downloaded") or 0)
+        current_fraction = current_done / current_total if current_total else 0
+        job["progress"] = min(100, round((completed + current_fraction) / total * 100, 1))
+        if values.get("item_complete"):
+            job["progress"] = min(100, round(completed / total * 100, 1))
+        job.pop("item_complete", None)
+
+
+def run_import_job(job_id: str, payload: BatchImportRequest) -> None:
+    async def run() -> None:
+        with SessionLocal() as db:
+            try:
+                result = await process_batch_import(
+                    payload, db, lambda update: update_import_job(job_id, update)
+                )
+                update_import_job(job_id, {
+                    **result,
+                    "status": "completed",
+                    "progress": 100,
+                    "results": result["results"],
+                })
+            except Exception as exc:
+                update_import_job(job_id, {
+                    "status": "failed",
+                    "error": str(getattr(exc, "detail", exc))[:500],
+                })
+
+    asyncio.run(run())
+
+
+@app.post("/api/imports/batch-jobs", status_code=202)
+def create_import_job(payload: BatchImportRequest) -> dict:
+    urls = extract_batch_urls(payload)
+    job_id = str(uuid4())
+    job = {
+        "id": job_id,
+        "platform": payload.platform,
+        "status": "queued",
+        "total": len(urls),
+        "current_index": 0,
+        "current_name": "等待开始",
+        "image_downloaded": 0,
+        "image_total": 0,
+        "progress": 0,
+        "imported": 0,
+        "skipped": 0,
+        "failed": 0,
+        "results": [],
+        "error": None,
+    }
+    with _IMPORT_JOBS_LOCK:
+        if len(_IMPORT_JOBS) >= 100:
+            finished_ids = [
+                key for key, value in _IMPORT_JOBS.items()
+                if value.get("status") in {"completed", "failed"}
+            ]
+            for key in finished_ids[: max(1, len(_IMPORT_JOBS) - 99)]:
+                _IMPORT_JOBS.pop(key, None)
+        _IMPORT_JOBS[job_id] = job
+    threading.Thread(
+        target=run_import_job,
+        args=(job_id, payload),
+        name=f"import-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    return deepcopy(job)
+
+
+@app.get("/api/imports/batch-jobs/{job_id}")
+def get_import_job(job_id: str) -> dict:
+    with _IMPORT_JOBS_LOCK:
+        job = _IMPORT_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="导入批次不存在或已过期")
+        return deepcopy(job)
 
 
 @app.get("/api/posts/{post_id}", response_model=PostResponse)
@@ -598,14 +805,28 @@ def list_publications(
 @app.post("/api/publications", status_code=201)
 def create_publication(payload: PublicationCreate, db: Session = Depends(get_db)) -> dict:
     post = get_post_or_404(db, payload.post_id)
-    version = get_or_create_version(db, post, payload.platform)
+    publication = build_publication(db, post, payload.platform, payload.visibility)
+    db.add(publication)
+    db.commit()
+    db.refresh(publication)
+    publication_agent.start(publication.id)
+    return serialize_publication(publication)
+
+
+def build_publication(
+    db: Session,
+    post: Post,
+    platform: str,
+    visibility: str,
+) -> PlatformPublication:
+    version = get_or_create_version(db, post, platform)
     asset_ids = selected_asset_ids(version)
     resolve_selected_assets(post, asset_ids)
     if not asset_ids:
         raise HTTPException(status_code=422, detail="请先在平台发布窗口中选择素材")
     active = db.scalar(select(PlatformPublication).where(
         PlatformPublication.post_id == post.id,
-        PlatformPublication.platform == payload.platform,
+        PlatformPublication.platform == platform,
         PlatformPublication.status.in_(ACTIVE_STATUSES),
     ))
     if active:
@@ -613,8 +834,8 @@ def create_publication(payload: PublicationCreate, db: Session = Depends(get_db)
     publication = PlatformPublication(
         post_id=post.id,
         platform_version_id=version.id,
-        platform=payload.platform,
-        visibility=payload.visibility,
+        platform=platform,
+        visibility=visibility,
         title=version.title,
         body=version.body,
         asset_ids_json=json.dumps(asset_ids),
@@ -624,11 +845,39 @@ def create_publication(payload: PublicationCreate, db: Session = Depends(get_db)
             "message": "发布任务已创建",
         }], ensure_ascii=False),
     )
-    db.add(publication)
+    return publication
+
+
+@app.post("/api/publications/batch", status_code=207)
+def create_publications_batch(
+    payload: PublicationBatchCreate,
+    db: Session = Depends(get_db),
+) -> dict:
+    post = get_post_or_404(db, payload.post_id)
+    # Create missing drafts before adding publications because the adapter's
+    # first-time draft creation commits its own transaction.
+    for platform in payload.platforms:
+        get_or_create_version(db, post, platform)
+    publications: list[PlatformPublication] = []
+    skipped: list[dict] = []
+    for platform in payload.platforms:
+        try:
+            publication = build_publication(db, post, platform, payload.visibility)
+            db.add(publication)
+            publications.append(publication)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            skipped.append({"platform": platform, "error": str(exc.detail)})
     db.commit()
-    db.refresh(publication)
-    publication_agent.start(publication.id)
-    return serialize_publication(publication)
+    for publication in publications:
+        db.refresh(publication)
+        publication_agent.start(publication.id)
+    return {
+        "created": [serialize_publication(publication) for publication in publications],
+        "skipped": skipped,
+        "total": len(payload.platforms),
+    }
 
 
 def publication_time():
