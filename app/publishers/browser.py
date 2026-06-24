@@ -11,6 +11,47 @@ from .base import ContentCallback, PublicationCancelled, PublishSnapshot, Status
 from ..config import settings
 
 
+_HERE = Path(__file__).resolve().parent
+
+
+def _load_anti_detection_data() -> tuple[tuple[str, ...], str, str]:
+    """从同目录的 anti_detection_args.txt 与 anti_detection.js 读取反检测数据。
+
+    返回:
+        (浏览器启动参数元组, 原始 JS init script 文本, 带指纹配置的 init script)
+    解耦目标：启动参数（纯文本，一行一个，支持 # 注释）与 init script（独立
+    JS 文件）都从 Python 源码中移除，便于用编辑器独立维护与审阅。
+    文件缺失时返回空数据，保证代码路径仍能正常运行。
+    """
+    from .fingerprint_config import FingerprintConfig  # 延迟导入避免循环
+
+    args_path = _HERE / "anti_detection_args.txt"
+    js_path = _HERE / "anti_detection.js"
+    try:
+        args_lines: list[str] = []
+        if args_path.is_file():
+            for raw in args_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                args_lines.append(line)
+        raw_init_script = ""
+        if js_path.is_file():
+            raw_init_script = js_path.read_text(encoding="utf-8")
+        # 基于随机设备 profile 拼入 __fp_cfg__（包含屏幕/CPU/时区/字体等）
+        cfg = FingerprintConfig.random()
+        fingerprinted_init_script = cfg.build_init_script(raw_init_script)
+    except Exception:
+        return (), "", ""
+    return tuple(args_lines), raw_init_script, fingerprinted_init_script
+
+
+# 模块级只读引用：运行时从文件加载，避免 Python 源码里混合长字符串
+ANTI_DETECTION_ARGS, _RAW_ANTI_DETECTION_INIT_SCRIPT, ANTI_DETECTION_INIT_SCRIPT = (
+    _load_anti_detection_data()
+)
+
+
 PUBLISH_URLS = {
     "douyin": "https://creator.douyin.com/creator-micro/content/upload",
     "xiaohongshu": "https://creator.xiaohongshu.com/publish/publish",
@@ -67,11 +108,20 @@ def _browser_executable() -> Path | None:
 
 
 def browser_context_options(*, visible: bool, accept_downloads: bool = False) -> dict:
+    base_args = ["--start-maximized"] if visible else []
+    # 去重：保持基础参数与反检测参数的顺序，使用 dict.fromkeys 去重
+    extra_args: list[str] = []
+    extra_args.extend(base_args)
+    extra_args.extend(ANTI_DETECTION_ARGS)
+    seen: dict[str, None] = dict.fromkeys(extra_args)
+    final_args = list(seen.keys())
     options = {
         "headless": not visible,
         "no_viewport": visible,
         "accept_downloads": accept_downloads,
-        "args": ["--start-maximized"] if visible else [],
+        "args": final_args,
+        # 禁止 Playwright 默认注入 "--enable-automation"，这是最基础的反爬指纹
+        "ignore_default_args": ["--enable-automation"],
     }
     if settings.browser_user_agent:
         options["user_agent"] = settings.browser_user_agent
@@ -169,6 +219,16 @@ class BrowserPublisher(ABC):
             page = None
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                # 注入反指纹 init script（在页面脚本之前执行）
+                if ANTI_DETECTION_INIT_SCRIPT:
+                    try:
+                        context.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
+                    except Exception:
+                        # 旧版 Playwright 或上下文已关闭时，退化为在当前 page 注入
+                        try:
+                            page.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
+                        except Exception:
+                            pass
                 self._active_page = page
                 page.on("close", lambda: self._page_closed_event.set())
                 page.on("response", self._capture_risk_response)

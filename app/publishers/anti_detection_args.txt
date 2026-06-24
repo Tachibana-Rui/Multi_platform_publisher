@@ -1,0 +1,22 @@
+# ============================================================
+# 反自动化检测：浏览器启动参数
+# 每行一个参数，以 # 开头的行视为注释会被跳过
+# ============================================================
+
+# 在 Blink 渲染引擎层面关闭 "浏览器被自动化控制" 状态
+--disable-blink-features=AutomationControlled
+
+# 关闭首次运行 / 默认浏览器检查
+--no-first-run
+--no-default-browser-check
+
+# 关闭 info bar / 弹窗阻塞
+--disable-infobars
+--disable-popup-blocking
+
+# 关闭 Translate / 站点隔离等不必要特性
+--disable-features=IsolateOrigins,site-per-process,Translate
+
+# 忽略证书错误（部分内网/开发环境所需）
+--ignore-certificate-errors
+--test-type
