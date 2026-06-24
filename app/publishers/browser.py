@@ -52,6 +52,21 @@ ANTI_DETECTION_ARGS, _RAW_ANTI_DETECTION_INIT_SCRIPT, ANTI_DETECTION_INIT_SCRIPT
 )
 
 
+def apply_anti_detection_script(context, page=None) -> None:
+    """Inject anti-detection init script into a Playwright context."""
+    if not ANTI_DETECTION_INIT_SCRIPT:
+        return
+    try:
+        context.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
+    except Exception:
+        if page is None:
+            return
+        try:
+            page.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
+        except Exception:
+            pass
+
+
 PUBLISH_URLS = {
     "douyin": "https://creator.douyin.com/creator-micro/content/upload",
     "xiaohongshu": "https://creator.xiaohongshu.com/publish/publish",
@@ -219,16 +234,7 @@ class BrowserPublisher(ABC):
             page = None
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                # 注入反指纹 init script（在页面脚本之前执行）
-                if ANTI_DETECTION_INIT_SCRIPT:
-                    try:
-                        context.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
-                    except Exception:
-                        # 旧版 Playwright 或上下文已关闭时，退化为在当前 page 注入
-                        try:
-                            page.add_init_script(ANTI_DETECTION_INIT_SCRIPT)
-                        except Exception:
-                            pass
+                apply_anti_detection_script(context, page)
                 self._active_page = page
                 page.on("close", lambda: self._page_closed_event.set())
                 page.on("response", self._capture_risk_response)

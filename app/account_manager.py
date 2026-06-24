@@ -9,6 +9,7 @@ from .publishers.browser import (
     PLATFORM_BROWSER_LOCKS,
     PUBLISH_URLS,
     _browser_executable,
+    apply_anti_detection_script,
     browser_context_options,
 )
 
@@ -100,6 +101,7 @@ class AccountManager:
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
+                    apply_anti_detection_script(context, page)
                     page_closed = threading.Event()
                     page.on("close", lambda: page_closed.set())
                     page.goto(ACCOUNT_URLS[platform], wait_until="load", timeout=90_000)
