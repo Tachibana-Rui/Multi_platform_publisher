@@ -70,6 +70,7 @@ const elements = {
   aiConfigForm: document.querySelector("#aiConfigForm"),
   doubaoApiKey: document.querySelector("#doubaoApiKey"),
   doubaoModel: document.querySelector("#doubaoModel"),
+  doubaoWebSearch: document.querySelector("#doubaoWebSearch"),
   apiKeyState: document.querySelector("#apiKeyState"),
   apiKeyHint: document.querySelector("#apiKeyHint"),
   storageModal: document.querySelector("#storageModal"),
@@ -307,6 +308,7 @@ function closeLibrary() {
 async function loadLlmSettings() {
   state.llmSettings = await api("/api/settings/llm");
   elements.doubaoModel.value = state.llmSettings.model;
+  elements.doubaoWebSearch.checked = state.llmSettings.enable_web_search !== false;
   elements.doubaoApiKey.value = "";
   elements.apiKeyState.textContent = state.llmSettings.has_api_key ? "已配置" : "未配置";
   elements.apiKeyState.classList.toggle("ready", state.llmSettings.has_api_key);
@@ -407,6 +409,7 @@ const platformLabels = {
   douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站",
   kuaishou: "快手", wechat_channels: "视频号", wechat_moments: "微信朋友圈",
 };
+const platformImageLimits = { douyin: 30, xiaohongshu: 18, bilibili: 9 };
 
 function splitInteractiveTokens(body) {
   const result = { hashtags: [], mentions: [] };
@@ -451,6 +454,30 @@ function selectedPlatformAssetIds() {
   return [...elements.platformAssets.querySelectorAll("input:checked")].map((input) => input.value);
 }
 
+function selectedPlatformAssetInputs() {
+  return [...elements.platformAssets.querySelectorAll("input:checked")];
+}
+
+function enforcePlatformAssetSelection(changedInput) {
+  if (!changedInput.checked) return;
+  const inputs = [...elements.platformAssets.querySelectorAll("input")];
+  if (changedInput.dataset.media === "video") {
+    inputs.forEach((input) => {
+      if (input !== changedInput) input.checked = false;
+    });
+    return;
+  }
+  inputs
+    .filter((input) => input.dataset.media === "video")
+    .forEach((input) => { input.checked = false; });
+  const imageLimit = platformImageLimits[state.adapterPlatform] || 30;
+  const selectedImages = inputs.filter((input) => input.checked && input.dataset.media === "image");
+  if (selectedImages.length > imageLimit) {
+    changedInput.checked = false;
+    toast(`${platformLabels[state.adapterPlatform] || "该平台"}最多选择 ${imageLimit} 张图片`, true);
+  }
+}
+
 function suggestedPrompt() {
   const selected = new Set(selectedPlatformAssetIds());
   const count = Math.min([...elements.platformAssets.querySelectorAll("input[data-media='image']")]
@@ -461,8 +488,12 @@ function suggestedPrompt() {
 }
 
 function updateSelectedImageCount() {
-  const selected = selectedPlatformAssetIds();
-  elements.selectedImageCount.textContent = `已选择 ${selected.length} 个素材`;
+  const selected = selectedPlatformAssetInputs();
+  const videos = selected.filter((input) => input.dataset.media === "video").length;
+  const images = selected.filter((input) => input.dataset.media === "image").length;
+  elements.selectedImageCount.textContent = videos
+    ? "已选择 1 个视频"
+    : images ? `已选择 ${images} 张图片` : "已选择 0 个素材";
   elements.platformAssets.querySelectorAll(".selectable-asset").forEach((label) => {
     label.classList.toggle("selected", label.querySelector("input").checked);
   });
@@ -471,9 +502,10 @@ function updateSelectedImageCount() {
 function renderLlmReadiness() {
   if (!elements.llmReadiness) return;
   const ready = state.llmSettings?.has_api_key;
+  const mode = state.llmSettings?.enable_web_search === false ? "纯权重推理" : "联网搜索已启用";
   elements.llmReadiness.className = `llm-readiness ${ready ? "ready" : "warning"}`;
   elements.llmReadiness.innerHTML = ready
-    ? `<span></span><p>${escapeHtml(state.llmSettings.model)} 已就绪</p>`
+    ? `<span></span><p>${escapeHtml(state.llmSettings.model)} 已就绪 · ${mode}</p>`
     : '<span></span><p>尚未配置豆包 API Key</p>';
   elements.generateCopy.disabled = !ready;
 }
@@ -493,11 +525,12 @@ function renderPlatformVersion(version) {
       <input type="checkbox" data-media="${asset.media_type}" value="${asset.id}" ${selected.has(asset.id) ? "checked" : ""}>
       ${asset.media_type === "image"
         ? `<img src="${asset.url}" alt="${escapeHtml(asset.original_name)}" loading="lazy">`
-        : `<span class="video-asset-preview"><b>▶</b><small>${escapeHtml(asset.original_name)}</small></span>`}
+        : `<video src="${asset.url}#t=0.1" preload="metadata" muted></video><span class="video-asset-badge">▶ 视频</span>`}
       <span class="asset-selection-mark">✓</span>
       <span class="asset-selection-index">${index + 1}</span>
     </label>`).join("") : '<div class="library-empty">这份内容还没有可选择的素材</div>';
   elements.platformAssets.querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
+    enforcePlatformAssetSelection(input);
     state.platformDirty = true;
     updateSelectedImageCount();
     if (!state.platformVersion.last_prompt) elements.generationPrompt.value = suggestedPrompt();
@@ -535,6 +568,14 @@ function publicationCover(publication, className) {
   return `<div class="${className}"><video src="${publication.cover_url}#t=0.1" muted preload="metadata"></video></div>`;
 }
 
+function postMediaSummary(post) {
+  const videos = post.assets.filter((asset) => asset.media_type === "video").length;
+  const images = post.assets.filter((asset) => asset.media_type === "image").length;
+  if (videos && images) return `${videos} 个视频 · ${images} 张图片`;
+  if (videos) return `${videos} 个视频`;
+  return `${images} 张图片`;
+}
+
 function renderPublishedWorks() {
   const platform = elements.platformManagerFilter.value;
   const items = state.publishedPublications.filter((item) => !platform || item.platform === platform);
@@ -542,7 +583,7 @@ function renderPublishedWorks() {
     ? `共 ${items.length} 份作品，按实际发布时间倒序`
     : "该平台还没有已发布作品";
   elements.publishedGrid.innerHTML = items.length ? items.map((item) => `
-    <article class="published-card">
+    <article class="published-card" data-post-id="${item.post_id}" data-platform="${item.platform}" tabindex="0" role="button" aria-label="打开${escapeHtml(platformLabels[item.platform] || item.platform)}发布准备：${escapeHtml(item.title || item.post_title || "未命名内容")}">
       ${publicationCover(item, "published-cover")}
       <div class="published-card-body">
         <div class="published-card-head"><span class="platform-pill">${platformLabels[item.platform] || item.platform}</span><time>${formatDate(item.published_at || item.updated_at)}</time></div>
@@ -559,6 +600,13 @@ async function openPlatformManager() {
   const publications = await api("/api/publications");
   state.publishedPublications = publications.filter((item) => item.status === "published");
   renderPublishedWorks();
+}
+
+async function openPublishedWork(card) {
+  if (!card?.dataset.postId || !card?.dataset.platform) return;
+  const post = await api(`/api/posts/${card.dataset.postId}`);
+  closePlatformManager();
+  await openPlatformAdapter(post, card.dataset.platform);
 }
 
 function closePlatformManager() {
@@ -642,7 +690,7 @@ async function openPublishQueue() {
   state.queuePosts = await api("/api/posts");
   const publishable = state.queuePosts.filter((post) => post.assets.length);
   elements.queuePostSelect.innerHTML = publishable.length
-    ? publishable.map((post) => `<option value="${post.id}">${escapeHtml(post.title || "未命名内容")} · ${post.assets.length} 个素材</option>`).join("")
+    ? publishable.map((post) => `<option value="${post.id}">${escapeHtml(post.title || "未命名内容")} · ${postMediaSummary(post)}</option>`).join("")
     : '<option value="">请先为内容添加素材</option>';
   elements.startBatchPublish.disabled = !publishable.length;
   await loadPublishQueue();
@@ -708,14 +756,14 @@ async function loadLatestPublication() {
   }
 }
 
-async function openPlatformAdapter(post) {
+async function openPlatformAdapter(post, initialPlatform = "douyin") {
   state.adapterPost = post;
-  state.adapterPlatform = "douyin";
+  state.adapterPlatform = initialPlatform;
   state.browserSyncedContent = null;
   elements.publicationVisibility.value = "public";
   elements.platformModal.hidden = false;
   document.body.style.overflow = "hidden";
-  await Promise.all([loadLlmSettings(), loadPlatformVersion("douyin")]);
+  await Promise.all([loadLlmSettings(), loadPlatformVersion(initialPlatform)]);
 }
 
 function closePlatformAdapter() {
@@ -1069,7 +1117,10 @@ elements.aiConfigForm.addEventListener("submit", async (event) => {
   const button = document.querySelector("#saveAiConfigButton");
   button.disabled = true; button.textContent = "保存中…";
   try {
-    const payload = { model: elements.doubaoModel.value.trim() };
+    const payload = {
+      model: elements.doubaoModel.value.trim(),
+      enable_web_search: elements.doubaoWebSearch.checked,
+    };
     if (elements.doubaoApiKey.value.trim()) payload.api_key = elements.doubaoApiKey.value.trim();
     state.llmSettings = await api("/api/settings/llm", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -1328,6 +1379,19 @@ document.querySelector("#platformManagerButton").addEventListener("click", () =>
 document.querySelector("#closePlatformManagerButton").addEventListener("click", closePlatformManager);
 elements.platformManagerModal.addEventListener("click", (event) => { if (event.target === elements.platformManagerModal) closePlatformManager(); });
 elements.platformManagerFilter.addEventListener("change", renderPublishedWorks);
+elements.publishedGrid.addEventListener("click", (event) => {
+  if (event.target.closest("a")) return;
+  const card = event.target.closest(".published-card");
+  if (!card) return;
+  openPublishedWork(card).catch((error) => toast(error.message, true));
+});
+elements.publishedGrid.addEventListener("keydown", (event) => {
+  if (!["Enter", " "].includes(event.key) || event.target.closest("a")) return;
+  const card = event.target.closest(".published-card");
+  if (!card) return;
+  event.preventDefault();
+  openPublishedWork(card).catch((error) => toast(error.message, true));
+});
 document.querySelector("#publishQueueButton").addEventListener("click", () => openPublishQueue().catch((error) => toast(error.message, true)));
 document.querySelector("#closePublishQueueButton").addEventListener("click", closePublishQueue);
 elements.publishQueueModal.addEventListener("click", (event) => { if (event.target === elements.publishQueueModal) closePublishQueue(); });

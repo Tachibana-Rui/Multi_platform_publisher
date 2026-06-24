@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC
+import random
 import re
 import threading
 import time
@@ -29,6 +30,13 @@ VISIBILITY_NAMES = {"public": "公开可见", "friends": "仅互关好友可见"
 INTERACTIVE_TOKEN_PATTERN = re.compile(
     r"(?<!\w)([#＃@＠][^\s#＃@＠,，。.!！?？;；:：]+)"
 )
+RISK_TEXT_PATTERN = re.compile(
+    r"验证码|安全验证|身份验证|操作频繁|请求过于频繁|429|Too Many Requests|"
+    r"登录异常|重新登录|扫码登录|登录后|请登录|账号异常|风控",
+    re.IGNORECASE,
+)
+LOGIN_URL_PATTERN = re.compile(r"login|signin|passport|sso", re.IGNORECASE)
+RISK_RESPONSE_STATUSES = {401, 403, 429}
 
 
 def split_interactive_tokens(body: str) -> tuple[list[str], list[str]]:
@@ -56,6 +64,20 @@ def _browser_executable() -> Path | None:
         Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
     ]
     return next((path for path in candidates if path.is_file()), None)
+
+
+def browser_context_options(*, visible: bool, accept_downloads: bool = False) -> dict:
+    options = {
+        "headless": not visible,
+        "no_viewport": visible,
+        "accept_downloads": accept_downloads,
+        "args": ["--start-maximized"] if visible else [],
+    }
+    if settings.browser_user_agent:
+        options["user_agent"] = settings.browser_user_agent
+    if settings.browser_timezone:
+        options["timezone_id"] = settings.browser_timezone
+    return options
 
 
 class BrowserPublisher(ABC):
@@ -131,26 +153,47 @@ class BrowserPublisher(ABC):
         profile_dir = settings.browser_profile_dir / self.platform
         profile_dir.mkdir(parents=True, exist_ok=True)
         self._page_closed_event = threading.Event()
+        self._risk_event = threading.Event()
+        self._risk_message = ""
+        self._active_cancel_event = cancel_event
+        self._active_on_status = on_status
+        self._active_page = None
+        self._action_count = 0
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 str(profile_dir),
                 executable_path=str(executable),
-                headless=False,
-                no_viewport=True,
-                accept_downloads=False,
-                args=["--start-maximized"],
+                **browser_context_options(visible=True, accept_downloads=False),
             )
             page = None
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                self._active_page = page
                 page.on("close", lambda: self._page_closed_event.set())
+                page.on("response", self._capture_risk_response)
                 on_status("awaiting_login", f"请在打开的{self.display_name}窗口中完成登录")
-                page.goto(self.publish_url(snapshot), wait_until="domcontentloaded", timeout=90_000)
+                page.goto(self.publish_url(snapshot), wait_until="load", timeout=90_000)
+                self._wait_for_full_load(page, cancel_event)
                 file_input = self._wait_for_file_input(page, snapshot, cancel_event)
-                self._check_cancelled(cancel_event)
+                self._check_runtime_pause(page, cancel_event)
+                on_status("preparing", "已找到上传入口，上传前短暂停顿")
+                self._human_pause(
+                    page,
+                    settings.publish_upload_delay_min_seconds,
+                    settings.publish_upload_delay_max_seconds,
+                    cancel_event,
+                )
                 file_input.set_input_files([str(asset.path) for asset in snapshot.assets])
-                on_status("preparing", "素材已交给平台上传，正在填写标题和正文")
+                self._record_human_action(page, cancel_event)
+                on_status("preparing", "素材已交给平台上传，上传后短暂停顿")
+                self._human_pause(
+                    page,
+                    settings.publish_upload_delay_min_seconds,
+                    settings.publish_upload_delay_max_seconds,
+                    cancel_event,
+                )
+                on_status("preparing", "正在分步填写标题和正文")
                 self._wait_and_fill_metadata(page, snapshot, cancel_event)
                 visibility_applied = self._wait_and_apply_visibility(
                     page, snapshot.visibility, cancel_event
@@ -172,7 +215,7 @@ class BrowserPublisher(ABC):
                     self._body_for_prefill(snapshot),
                 )
                 while True:
-                    self._check_cancelled(cancel_event)
+                    self._check_runtime_pause(page, cancel_event)
                     if page.is_closed():
                         raise RuntimeError("平台发布窗口已关闭")
                     current_content = self._read_metadata(page, snapshot)
@@ -186,21 +229,24 @@ class BrowserPublisher(ABC):
                     if confirm_event.wait(0.5):
                         break
 
-                self._check_cancelled(cancel_event)
+                self._check_runtime_pause(page, cancel_event)
                 on_status("publishing", "正在向平台提交作品")
                 button = self._find_publish_button(page)
                 if button is None:
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
+                        self._check_runtime_pause(page, cancel_event)
                         manual_result = self._detect_result(page, review_url)
                         if manual_result:
                             manual_result["manual"] = True
                             return manual_result
                         page.wait_for_timeout(500)
                     raise RuntimeError("未找到可用的发布按钮，请确认平台必填项已经补全")
+                self._human_pause(page, 0.8, 1.8, cancel_event)
                 button.click(timeout=15_000)
-                self._click_secondary_confirmation(page)
-                return self._wait_for_result(page)
+                self._record_human_action(page, cancel_event)
+                self._click_secondary_confirmation(page, cancel_event)
+                return self._wait_for_result(page, cancel_event)
             except PublicationCancelled:
                 raise
             except Exception as exc:
@@ -216,12 +262,14 @@ class BrowserPublisher(ABC):
                     # A manually closed browser can make Playwright's close call fail.
                     # The publication worker must still unwind and release the platform lock.
                     pass
+                self._active_page = None
+                self._active_cancel_event = None
+                self._active_on_status = None
 
     def _wait_for_file_input(self, page, snapshot, cancel_event: threading.Event):
         deadline = time.monotonic() + 15 * 60
         while time.monotonic() < deadline:
-            self._check_cancelled(cancel_event)
-            self._ensure_page_available(page)
+            self._check_runtime_pause(page, cancel_event, allow_login=True)
             self._choose_upload_mode(page, snapshot)
             inputs = page.locator("input[type='file']")
             for index in range(inputs.count()):
@@ -233,7 +281,7 @@ class BrowserPublisher(ABC):
                 if media_type == "video" and "image" in accept and "video" not in accept:
                     continue
                 return item
-            page.wait_for_timeout(1000)
+            self._human_pause(page, 0.8, 1.2, cancel_event, allow_login=True)
         raise RuntimeError(f"等待{self.display_name}登录或上传入口超时")
 
     def _choose_upload_mode(self, page, snapshot: PublishSnapshot) -> None:
@@ -243,8 +291,7 @@ class BrowserPublisher(ABC):
         deadline = time.monotonic() + 2 * 60
         left_editor_at: float | None = None
         while time.monotonic() < deadline:
-            self._check_cancelled(cancel_event)
-            self._ensure_page_available(page)
+            self._check_runtime_pause(page, cancel_event)
             if self.platform == "douyin" and not self._is_publish_editor_url(page.url):
                 left_editor_at = left_editor_at or time.monotonic()
                 if time.monotonic() - left_editor_at >= 2:
@@ -256,7 +303,7 @@ class BrowserPublisher(ABC):
             filled = self._fill_metadata(page, snapshot)
             if filled:
                 return
-            page.wait_for_timeout(1000)
+            self._human_pause(page, 0.8, 1.2, cancel_event)
         raise RuntimeError("素材上传后未找到标题或正文编辑框，平台页面结构可能已变化")
 
     def _fill_metadata(self, page, snapshot: PublishSnapshot) -> bool:
@@ -369,26 +416,64 @@ class BrowserPublisher(ABC):
     ) -> bool:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            self._check_cancelled(cancel_event)
-            self._ensure_page_available(page)
+            self._check_runtime_pause(page, cancel_event)
             if self._apply_visibility(page, visibility):
+                self._record_human_action(page, cancel_event)
                 return True
-            page.wait_for_timeout(500)
+            self._human_pause(page, 0.4, 0.7, cancel_event)
         return False
 
-    @staticmethod
-    def _fill_first(page, selectors: tuple[str, ...], value: str) -> bool:
+    def _fill_first(self, page, selectors: tuple[str, ...], value: str) -> bool:
         for selector in selectors:
             locator = page.locator(selector)
             for index in range(min(locator.count(), 5)):
                 item = locator.nth(index)
                 try:
                     if item.is_visible():
-                        item.fill(value, timeout=3000)
+                        self._type_into_field(page, item, value)
                         return True
+                except RuntimeError:
+                    raise
                 except Exception:
                     continue
         return False
+
+    def _type_into_field(self, page, item, value: str) -> None:
+        cancel_event = getattr(self, "_active_cancel_event", None)
+        self._check_runtime_pause(page, cancel_event)
+        item.click(timeout=3000)
+        item.press("Control+A", timeout=3000)
+        item.press("Backspace", timeout=3000)
+        for chunk in self._typing_chunks(value):
+            self._check_runtime_pause(page, cancel_event)
+            item.type(chunk, delay=random.randint(25, 70), timeout=max(3000, len(chunk) * 250))
+            if not chunk.isspace():
+                self._human_pause(
+                    page,
+                    settings.publish_typing_pause_min_seconds,
+                    settings.publish_typing_pause_max_seconds,
+                    cancel_event,
+                )
+        self._record_human_action(page, cancel_event)
+
+    @staticmethod
+    def _typing_chunks(value: str) -> list[str]:
+        chunks: list[str] = []
+        for part in re.findall(r"\s+|[^\s]+", value):
+            if part.isspace():
+                chunks.append(part)
+                continue
+            sentence_parts = re.findall(r"[^。！？.!?；;，,、]+[。！？.!?；;，,、]?", part) or [part]
+            for sentence in sentence_parts:
+                if len(sentence) <= 10:
+                    chunks.append(sentence)
+                    continue
+                start = 0
+                while start < len(sentence):
+                    step = random.randint(5, 9)
+                    chunks.append(sentence[start:start + step])
+                    start += step
+        return chunks
 
     def _find_publish_button(self, page):
         for name in self.publish_names:
@@ -402,33 +487,35 @@ class BrowserPublisher(ABC):
                     continue
         return None
 
-    @staticmethod
-    def _click_secondary_confirmation(page) -> None:
-        page.wait_for_timeout(800)
+    def _click_secondary_confirmation(self, page, cancel_event: threading.Event) -> None:
+        self._human_pause(page, 0.7, 1.1, cancel_event)
         for text in ("确认发布", "确认投稿", "仍要发布"):
             locator = page.get_by_role("button", name=re.compile(rf"^{text}$"))
             if locator.count():
                 try:
                     if locator.first.is_visible() and locator.first.is_enabled():
                         locator.first.click(timeout=3000)
+                        self._record_human_action(page, cancel_event)
                         return
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
 
-    @staticmethod
-    def _wait_for_result(page) -> dict:
+    def _wait_for_result(self, page, cancel_event: threading.Event) -> dict:
         starting_url = page.url
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
+            self._check_runtime_pause(page, cancel_event)
             if page.is_closed():
                 break
             try:
                 result = BrowserPublisher._detect_result(page, starting_url)
                 if result:
                     return result
-                page.wait_for_timeout(1000)
             except Exception:
                 break
+            self._human_pause(page, 0.8, 1.2, cancel_event)
         return BrowserPublisher._result("submitted", page.url if not page.is_closed() else starting_url)
 
     @staticmethod
@@ -463,6 +550,102 @@ class BrowserPublisher(ABC):
     def _check_cancelled(cancel_event: threading.Event) -> None:
         if cancel_event.is_set():
             raise PublicationCancelled("发布任务已取消")
+
+    def _wait_for_full_load(self, page, cancel_event: threading.Event) -> None:
+        try:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
+        self._check_runtime_pause(page, cancel_event, allow_login=True)
+
+    def _capture_risk_response(self, response) -> None:
+        try:
+            status = response.status
+            resource_type = response.request.resource_type
+            if status == 429 or (status in RISK_RESPONSE_STATUSES and resource_type == "document"):
+                self._set_risk(
+                    f"平台返回 HTTP {status}（{resource_type}），可能触发限流、登录异常或安全验证"
+                )
+        except Exception:
+            return
+
+    def _set_risk(self, message: str) -> None:
+        if getattr(self, "_risk_event", None) is None:
+            return
+        if not self._risk_event.is_set():
+            self._risk_message = message
+            self._risk_event.set()
+
+    def _check_runtime_pause(
+        self,
+        page,
+        cancel_event: threading.Event | None,
+        *,
+        allow_login: bool = False,
+    ) -> None:
+        if cancel_event is not None:
+            self._check_cancelled(cancel_event)
+        self._ensure_page_available(page)
+        if getattr(self, "_risk_event", None) is not None and self._risk_event.is_set():
+            raise RuntimeError(
+                f"{self.display_name}发布已暂停：{self._risk_message or '检测到平台风控或登录异常'}，请人工处理后重试"
+            )
+        risk = self._detect_page_risk(page, allow_login=allow_login)
+        if risk:
+            self._set_risk(risk)
+            raise RuntimeError(f"{self.display_name}发布已暂停：{risk}，请人工处理后重试")
+
+    def _detect_page_risk(self, page, *, allow_login: bool) -> str | None:
+        if page is None or self._page_was_closed(page):
+            return None
+        try:
+            if not allow_login and LOGIN_URL_PATTERN.search(page.url or ""):
+                return "平台页面跳转到登录页"
+            body = page.locator("body")
+            if not body.count():
+                return None
+            text = body.inner_text(timeout=1000)
+        except Exception:
+            return None
+        match = RISK_TEXT_PATTERN.search(text[:20_000])
+        if not match:
+            return None
+        token = match.group(0)
+        if allow_login and token in {"扫码登录", "登录后", "请登录"}:
+            return None
+        return f"检测到页面提示“{token}”"
+
+    def _human_pause(
+        self,
+        page,
+        min_seconds: float,
+        max_seconds: float,
+        cancel_event: threading.Event | None,
+        *,
+        allow_login: bool = False,
+    ) -> None:
+        delay = random.uniform(min_seconds, max(min_seconds, max_seconds))
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            self._check_runtime_pause(page, cancel_event, allow_login=allow_login)
+            remaining = max(0.0, deadline - time.monotonic())
+            page.wait_for_timeout(max(50, int(min(0.25, remaining) * 1000)))
+
+    def _record_human_action(self, page, cancel_event: threading.Event | None) -> None:
+        self._action_count = getattr(self, "_action_count", 0) + 1
+        threshold = settings.publish_rest_every_actions
+        if threshold <= 0 or self._action_count < threshold:
+            return
+        self._action_count = 0
+        on_status = getattr(self, "_active_on_status", None)
+        if on_status:
+            on_status("preparing", "连续操作后短暂休息，保持正常人工节奏")
+        self._human_pause(
+            page,
+            settings.publish_rest_min_seconds,
+            settings.publish_rest_max_seconds,
+            cancel_event,
+        )
 
     def _ensure_page_available(self, page) -> None:
         if self._page_was_closed(page):
@@ -549,23 +732,35 @@ class DouyinPublisher(BrowserPublisher):
         hashtags: list[str],
         has_plain_body: bool,
     ) -> None:
+        cancel_event = getattr(self, "_active_cancel_event", None)
+        self._check_runtime_pause(page, cancel_event)
         editor.click(timeout=3000)
         editor.press("Control+End")
         if has_plain_body:
             editor.press("Enter")
             editor.press("Enter")
         for index, hashtag in enumerate(hashtags):
+            self._check_runtime_pause(page, cancel_event)
             if index:
                 editor.type(" ")
-            editor.type(f"#{hashtag}", delay=55)
+            editor.type(f"#{hashtag}", delay=random.randint(35, 80))
+            self._human_pause(
+                page,
+                settings.publish_typing_pause_min_seconds,
+                settings.publish_typing_pause_max_seconds,
+                cancel_event,
+            )
             if self._select_topic_candidate(page, hashtag):
                 self._bound_hashtags.append(hashtag)
             else:
                 self._unresolved_hashtags.append(hashtag)
+        self._record_human_action(page, cancel_event)
 
     def _select_topic_candidate(self, page, hashtag: str) -> bool:
+        cancel_event = getattr(self, "_active_cancel_event", None)
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
+            self._check_runtime_pause(page, cancel_event)
             for selector in self.topic_candidate_selectors:
                 candidates = page.locator(selector)
                 for index in range(min(candidates.count(), 12)):
@@ -577,11 +772,14 @@ class DouyinPublisher(BrowserPublisher):
                         if not self._topic_candidate_matches(text, hashtag):
                             continue
                         candidate.click(timeout=2000)
-                        page.wait_for_timeout(250)
+                        self._record_human_action(page, cancel_event)
+                        self._human_pause(page, 0.2, 0.4, cancel_event)
                         return True
+                    except RuntimeError:
+                        raise
                     except Exception:
                         continue
-            page.wait_for_timeout(150)
+            self._human_pause(page, 0.12, 0.2, cancel_event)
         return False
 
     @staticmethod
@@ -632,13 +830,18 @@ class DouyinPublisher(BrowserPublisher):
         if editor is None:
             return
         try:
+            cancel_event = getattr(self, "_active_cancel_event", None)
+            self._check_runtime_pause(page, cancel_event)
             editor.click(timeout=3000)
             editor.press("Control+End")
             editor.press("Enter")
             editor.press("Enter")
-            editor.type(f"@{mentions[0]}", delay=70)
-            page.wait_for_timeout(500)
+            editor.type(f"@{mentions[0]}", delay=random.randint(35, 80))
+            self._record_human_action(page, cancel_event)
+            self._human_pause(page, 0.4, 0.7, cancel_event)
             self._opened_mention = mentions[0]
+        except RuntimeError:
+            raise
         except Exception:
             self._opened_mention = None
 
@@ -665,7 +868,10 @@ class XiaohongshuPublisher(BrowserPublisher):
                 try:
                     if locator.first.is_visible():
                         locator.first.click(timeout=1000)
+                        self._record_human_action(page, getattr(self, "_active_cancel_event", None))
                         return
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
 
@@ -700,6 +906,9 @@ class BilibiliPublisher(BrowserPublisher):
                 try:
                     if locator.first.is_visible():
                         locator.first.click(timeout=1000)
+                        self._record_human_action(page, getattr(self, "_active_cancel_event", None))
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
 

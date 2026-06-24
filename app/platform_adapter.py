@@ -13,11 +13,43 @@ from .doubao import build_generation_prompt
 SUPPORTED_PLATFORMS = {
     "douyin", "xiaohongshu", "bilibili", "kuaishou", "wechat_channels"
 }
+PUBLISH_IMAGE_LIMITS = {
+    "douyin": 30,
+    "xiaohongshu": 18,
+    "bilibili": 9,
+}
 
 
 def validate_platform(platform: str) -> None:
     if platform not in SUPPORTED_PLATFORMS:
         raise HTTPException(status_code=422, detail="暂不支持该目标平台")
+
+
+def default_selected_asset_ids(post: Post, platform: str) -> list[str]:
+    videos = [asset for asset in post.assets if asset.media_type == "video"]
+    if videos:
+        return [videos[0].id]
+    limit = PUBLISH_IMAGE_LIMITS.get(platform, 30)
+    return [asset.id for asset in post.assets if asset.media_type == "image"][:limit]
+
+
+def validate_platform_assets(
+    platform: str,
+    assets: list[MediaAsset],
+    *,
+    require_assets: bool = False,
+) -> None:
+    if require_assets and not assets:
+        raise HTTPException(status_code=422, detail="请先在平台发布窗口中选择素材")
+    images = [asset for asset in assets if asset.media_type == "image"]
+    videos = [asset for asset in assets if asset.media_type == "video"]
+    if images and videos:
+        raise HTTPException(status_code=422, detail="单次发布不能混合图片和视频；请选择 1 个视频或多张图片")
+    if len(videos) > 1:
+        raise HTTPException(status_code=422, detail="单次发布只能选择 1 个视频")
+    image_limit = PUBLISH_IMAGE_LIMITS.get(platform)
+    if image_limit is not None and len(images) > image_limit:
+        raise HTTPException(status_code=422, detail=f"该平台单次最多选择 {image_limit} 张图片")
 
 
 def get_or_create_version(db: Session, post: Post, platform: str) -> PlatformVersion:
@@ -28,7 +60,7 @@ def get_or_create_version(db: Session, post: Post, platform: str) -> PlatformVer
     ))
     if version:
         return version
-    default_assets = [asset.id for asset in post.assets][:30]
+    default_assets = default_selected_asset_ids(post, platform)
     version = PlatformVersion(
         post_id=post.id,
         platform=platform,

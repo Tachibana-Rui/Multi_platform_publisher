@@ -15,6 +15,7 @@ from .config import settings
 
 DEFAULT_MODEL = "doubao-seed-2-0-lite-260428"
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_ENABLE_WEB_SEARCH = True
 MODEL_ALIASES = {
     "Doubao-Seed-2.0-lite": DEFAULT_MODEL,
     "doubao-seed-2-0-lite": DEFAULT_MODEL,
@@ -67,7 +68,11 @@ def _unprotect(value: str) -> str:
 
 def _read() -> dict:
     if not SETTINGS_PATH.exists():
-        return {"model": DEFAULT_MODEL, "base_url": DEFAULT_BASE_URL}
+        return {
+            "model": DEFAULT_MODEL,
+            "base_url": DEFAULT_BASE_URL,
+            "enable_web_search": DEFAULT_ENABLE_WEB_SEARCH,
+        }
     try:
         payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -77,6 +82,7 @@ def _read() -> dict:
         "model": MODEL_ALIASES.get(configured_model, configured_model),
         "base_url": DEFAULT_BASE_URL,
         "api_key_protected": payload.get("api_key_protected"),
+        "enable_web_search": bool(payload.get("enable_web_search", DEFAULT_ENABLE_WEB_SEARCH)),
     }
 
 
@@ -88,6 +94,8 @@ def get_public_settings() -> dict:
             "provider": "doubao",
             "model": payload["model"],
             "base_url": DEFAULT_BASE_URL,
+            "enable_web_search": payload["enable_web_search"],
+            "api_mode": "responses" if payload["enable_web_search"] else "chat_completions",
             "has_api_key": bool(key),
             "api_key_hint": f"••••{key[-4:]}" if key else None,
         }
@@ -100,10 +108,16 @@ def get_private_settings() -> dict:
             "model": payload["model"],
             "base_url": DEFAULT_BASE_URL,
             "api_key": _unprotect(payload.get("api_key_protected") or ""),
+            "enable_web_search": payload["enable_web_search"],
         }
 
 
-def update_settings(api_key=None, model=None, clear_api_key: bool = False) -> dict:
+def update_settings(
+    api_key=None,
+    model=None,
+    clear_api_key: bool = False,
+    enable_web_search: bool | None = None,
+) -> dict:
     with _lock:
         current = _read()
         if clear_api_key:
@@ -112,6 +126,8 @@ def update_settings(api_key=None, model=None, clear_api_key: bool = False) -> di
             current["api_key_protected"] = _protect(api_key.strip())
         if model is not None and model.strip():
             current["model"] = model.strip()
+        if enable_web_search is not None:
+            current["enable_web_search"] = bool(enable_web_search)
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         temporary = SETTINGS_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")

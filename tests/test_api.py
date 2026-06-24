@@ -36,6 +36,10 @@ def make_png() -> bytes:
     return buffer.getvalue()
 
 
+def make_fake_mp4() -> bytes:
+    return b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isomcontent-hub-video"
+
+
 def wait_for_scan(client: TestClient, root_id: str, timeout: float = 5) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -245,8 +249,72 @@ def test_llm_settings_are_encrypted_and_never_returned():
         assert payload["has_api_key"] is True
         assert payload["api_key_hint"] == "••••1234"
         assert payload["model"] == "doubao-seed-2-0-lite-260428"
+        assert payload["enable_web_search"] is True
+        assert payload["api_mode"] == "responses"
         assert "api_key" not in payload
         assert "test-secret-api-key-1234" not in SETTINGS_PATH.read_text(encoding="utf-8")
+
+        disabled = client.put("/api/settings/llm", json={"enable_web_search": False})
+        assert disabled.status_code == 200
+        assert disabled.json()["enable_web_search"] is False
+        assert disabled.json()["api_mode"] == "chat_completions"
+
+
+def test_doubao_generation_uses_responses_web_search(monkeypatch):
+    import asyncio
+    import httpx
+
+    from app.doubao import generate_copy
+    from app.models import Post, Tag
+
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, headers, json):
+            calls.append({"url": url, "headers": headers, "json": json})
+            return httpx.Response(200, json={
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [{
+                            "type": "output_text",
+                            "text": '{"title":"趋势标题","body":"结合最新趋势的正文。","tags":["趋势","豆包","内容创作","小红书","灵感"]}',
+                        }],
+                    },
+                ],
+            })
+
+    monkeypatch.setattr("app.doubao.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("app.doubao.get_private_settings", lambda: {
+        "model": "doubao-seed-2-0-lite-260428",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "api_key": "test-key",
+        "enable_web_search": True,
+    })
+
+    post = Post(title="Seed 2.0 最新玩法", tags=[Tag(name="豆包")])
+    result = asyncio.run(generate_copy(post, "xiaohongshu", [], "结合最近趋势生成文案"))
+
+    assert result["title"] == "趋势标题"
+    assert result["model"] == "doubao-seed-2-0-lite-260428 · Web Search"
+    assert calls[0]["url"] == "https://ark.cn-beijing.volces.com/api/v3/responses"
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
+    assert calls[0]["json"]["tools"] == [{"type": "web_search"}]
+    assert calls[0]["json"]["text"]["format"]["type"] == "json_object"
+    assert calls[0]["json"]["input"][1]["content"][0] == {
+        "type": "input_text",
+        "text": "结合最近趋势生成文案",
+    }
 
 
 def test_platform_version_copies_source_and_can_regenerate(monkeypatch):
@@ -313,6 +381,34 @@ def test_untitled_content_stays_blank_until_user_generates():
         assert version["title"] == ""
         assert version["body"] == ""
         assert version["content_source"] == "copied"
+
+
+def test_video_platform_version_defaults_to_single_video_and_rejects_mixed_media():
+    with TestClient(app) as client:
+        post = client.post(
+            "/api/posts",
+            json={"title": "视频作品", "body": "视频正文", "content_type": "video"},
+        ).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[
+                ("files", ("clip.mp4", make_fake_mp4(), "video/mp4")),
+                ("files", ("cover.png", make_png(), "image/png")),
+            ],
+        ).json()
+        video_id = next(asset["id"] for asset in post["assets"] if asset["media_type"] == "video")
+        image_id = next(asset["id"] for asset in post["assets"] if asset["media_type"] == "image")
+
+        version = client.get(f"/api/posts/{post['id']}/platform-versions/douyin")
+        assert version.status_code == 200
+        assert version.json()["selected_asset_ids"] == [video_id]
+
+        mixed = client.put(
+            f"/api/posts/{post['id']}/platform-versions/douyin",
+            json={"title": "视频作品", "body": "视频正文", "selected_asset_ids": [video_id, image_id]},
+        )
+        assert mixed.status_code == 422
+        assert "混合图片和视频" in mixed.json()["detail"]
 
 
 def test_publication_snapshots_version_and_requires_final_review(monkeypatch):
@@ -625,6 +721,40 @@ def test_multi_platform_batch_publication_and_published_metadata(monkeypatch):
         assert record["published_at"] is not None
 
 
+def test_multi_platform_batch_video_publication_uses_video_asset(monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        "app.main.publication_agent.start",
+        lambda publication_id: started.append(publication_id) or True,
+    )
+    with TestClient(app) as client:
+        post = client.post(
+            "/api/posts",
+            json={"title": "多平台视频发布", "body": "视频批量正文", "content_type": "video"},
+        ).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[
+                ("files", ("multi-platform.mp4", make_fake_mp4(), "video/mp4")),
+                ("files", ("video-cover.png", make_png(), "image/png")),
+            ],
+        ).json()
+        video = next(asset for asset in post["assets"] if asset["media_type"] == "video")
+        response = client.post("/api/publications/batch", json={
+            "post_id": post["id"],
+            "platforms": ["douyin", "xiaohongshu", "bilibili"],
+            "visibility": "public",
+        })
+        assert response.status_code == 207
+        publications = response.json()["created"]
+        assert len(publications) == 3
+        assert len(started) == 3
+        assert {item["platform"] for item in publications} == {"douyin", "xiaohongshu", "bilibili"}
+        assert all(item["asset_ids"] == [video["id"]] for item in publications)
+        assert all(item["cover_media_type"] == "video" for item in publications)
+        assert all(item["cover_url"] == video["url"] for item in publications)
+
+
 def test_publication_record_can_be_marked_and_deleted(monkeypatch):
     monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
     with TestClient(app) as client:
@@ -838,3 +968,56 @@ def test_publish_agent_releases_platform_lock_after_page_cancellation(monkeypatc
         record = db.get(PlatformPublication, publication["id"])
         assert record.status == "cancelled"
         assert "可以直接重试" in record.error_message
+
+
+def test_publication_daily_limit_is_enforced(monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import PlatformPublication
+    from app.publish_agent import publication_agent
+    from app.publishers.base import PublishSnapshot
+
+    monkeypatch.setattr(settings, "daily_publish_limit", 1)
+    monkeypatch.setattr(settings, "publish_day_timezone", "UTC")
+
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "每日上限"}).json()
+
+    platform = "limit_test"
+    with SessionLocal() as db:
+        db.add(PlatformPublication(
+            post_id=post["id"],
+            platform=platform,
+            status="published",
+            published_at=datetime.now(timezone.utc),
+            logs_json="[]",
+        ))
+        db.commit()
+
+    snapshot = PublishSnapshot(
+        id="daily-limit",
+        post_id=post["id"],
+        platform=platform,
+        visibility="public",
+        title="标题",
+        body="正文",
+        assets=[],
+    )
+    try:
+        publication_agent._enforce_daily_limit("daily-limit", snapshot, "测试平台")
+    except RuntimeError as exc:
+        assert "每日发布上限" in str(exc)
+    else:
+        raise AssertionError("daily publication limit should stop the task")
+
+
+def test_batch_import_pause_detection():
+    from fastapi import HTTPException
+
+    from app.main import should_pause_import_batch
+
+    assert should_pause_import_batch(HTTPException(status_code=429, detail="Too Many Requests"))
+    assert should_pause_import_batch(HTTPException(status_code=422, detail="触发平台验证码"))
+    assert not should_pause_import_batch(HTTPException(status_code=409, detail="该作品已经导入"))

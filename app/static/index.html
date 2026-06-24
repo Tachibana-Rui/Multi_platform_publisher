@@ -186,7 +186,7 @@
         <div class="config-body">
           <div class="provider-banner">
             <span class="doubao-mark">豆包</span>
-            <div><strong>火山方舟 · Chat Completions</strong><small>配置仅保存在当前 Windows 用户的本机环境</small></div>
+            <div><strong>火山方舟 · Responses + Web Search</strong><small>配置仅保存在当前 Windows 用户的本机环境</small></div>
             <span class="config-state" id="apiKeyState">未配置</span>
           </div>
           <label class="field">
@@ -201,6 +201,10 @@
           <label class="field">
             <span>API 地址</span>
             <input id="doubaoBaseUrl" value="https://ark.cn-beijing.volces.com/api/v3" readonly>
+          </label>
+          <label class="switch-field">
+            <input id="doubaoWebSearch" type="checkbox" checked>
+            <span><strong>联网搜索</strong><small>开启后使用 Responses API，并向豆包声明 web_search 工具以获取实时公开信息。</small></span>
           </label>
           <div class="import-note"><span>i</span><p>API Key 不会发送到浏览器日志，也不会通过读取接口返回。更换 Key 时直接输入并保存；留空则保留现有 Key。</p></div>
         </div>
@@ -330,7 +334,7 @@
           </div>
         </section>
         <aside class="platform-assets-panel">
-          <div class="platform-assets-heading"><div><strong>选择发布素材</strong><small id="selectedImageCount">已选择 0 个</small></div><span>前 4 张图片供 LLM 理解</span></div>
+          <div class="platform-assets-heading"><div><strong>选择发布素材</strong><small id="selectedImageCount">已选择 0 个</small></div><span>视频单选，图片可多选</span></div>
           <div class="platform-assets-grid" id="platformAssetsGrid"></div>
           <section class="publication-panel" id="publicationPanel">
             <div class="publication-empty">保存草稿后，可由发布 Agent 打开平台创作中心并自动填写。</div>

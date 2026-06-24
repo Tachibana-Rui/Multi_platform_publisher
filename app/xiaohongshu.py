@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable
 import hashlib
 import json
 import mimetypes
 from pathlib import Path
+import random
 import re
 import shutil
 from urllib.parse import urljoin, urlparse
@@ -21,6 +23,8 @@ from .config import settings
 PAGE_HOSTS = ("xiaohongshu.com", "xhslink.com")
 MEDIA_HOSTS = ("xhscdn.com", "xhscdn.net", "xiaohongshu.com")
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+PAUSE_STATUSES = {401, 403, 429}
+TRANSIENT_STATUSES = {408, 500, 502, 503, 504}
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
@@ -207,6 +211,14 @@ async def _fetch_page(client: httpx.AsyncClient, source_url: str) -> tuple[str, 
             current = urljoin(current, location)
             continue
         if response.status_code != 200:
+            if response.status_code in PAUSE_STATUSES:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=(
+                        f"小红书页面返回状态 {response.status_code}，可能需要登录、验证码"
+                        "或请求过于频繁，已暂停导入"
+                    ),
+                )
             raise HTTPException(
                 status_code=502,
                 detail=f"小红书页面返回状态 {response.status_code}，作品可能需要登录或已不可见",
@@ -238,6 +250,27 @@ async def _download_media(
     position: int,
     referer: str,
 ) -> tuple[dict, Path]:
+    last_error: HTTPException | None = None
+    for attempt in range(1, settings.import_media_retry_attempts + 1):
+        try:
+            return await _download_media_once(client, source, target_dir, position, referer)
+        except HTTPException as exc:
+            if _should_pause_import(exc) or not _should_retry_download(exc) or attempt >= settings.import_media_retry_attempts:
+                raise
+            last_error = exc
+            await asyncio.sleep(min(8.0, 0.8 * attempt + random.uniform(0.2, 0.8)))
+    if last_error:
+        raise last_error
+    raise HTTPException(status_code=502, detail=f"第 {position} 个媒体文件下载失败")
+
+
+async def _download_media_once(
+    client: httpx.AsyncClient,
+    source: MediaSource,
+    target_dir: Path,
+    position: int,
+    referer: str,
+) -> tuple[dict, Path]:
     current = source.url
     for _ in range(5):
         if not _host_allowed(urlparse(current).hostname, MEDIA_HOSTS):
@@ -253,7 +286,19 @@ async def _download_media(
                     current = urljoin(current, location)
                     continue
                 if response.status_code != 200:
-                    raise HTTPException(status_code=502, detail=f"第 {position} 个媒体文件下载失败")
+                    if response.status_code in PAUSE_STATUSES:
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=(
+                                f"第 {position} 个媒体文件返回状态 {response.status_code}，"
+                                "可能触发登录、验证码或限流，已暂停导入"
+                            ),
+                        )
+                    status_code = 502 if response.status_code in TRANSIENT_STATUSES else 422
+                    raise HTTPException(
+                        status_code=status_code,
+                        detail=f"第 {position} 个媒体文件返回状态 {response.status_code}",
+                    )
                 mime_type = response.headers.get("content-type", "application/octet-stream")
                 if mime_type.startswith("text/"):
                     raise HTTPException(status_code=422, detail=f"第 {position} 个媒体文件返回了无效内容")
@@ -287,6 +332,26 @@ async def _download_media(
     raise HTTPException(status_code=422, detail="媒体地址跳转次数过多")
 
 
+def _should_retry_download(exc: HTTPException) -> bool:
+    return exc.status_code in {502, 503, 504}
+
+
+def _should_pause_import(exc: HTTPException) -> bool:
+    detail = str(exc.detail)
+    return exc.status_code in PAUSE_STATUSES or any(
+        token in detail for token in ("验证码", "安全验证", "登录", "限流", "过于频繁", "429", "暂停")
+    )
+
+
+async def _wait_between_media_downloads() -> None:
+    delay = random.uniform(
+        settings.import_media_delay_min_seconds,
+        settings.import_media_delay_max_seconds,
+    )
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 async def import_public_note(
     source_url: str,
     post_id: str,
@@ -315,6 +380,8 @@ async def import_public_note(
                 })
             assets: list[dict] = []
             for position, source in enumerate(note.media, start=1):
+                if position > 1:
+                    await _wait_between_media_downloads()
                 details, path = await _download_media(client, source, target_dir, position, canonical_url)
                 total_size += details["file_size"]
                 if total_size > settings.max_import_total_bytes:

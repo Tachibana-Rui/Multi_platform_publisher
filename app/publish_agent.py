@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import threading
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .config import settings
 from .database import SessionLocal
@@ -32,6 +33,7 @@ PUBLICATION_PROGRESS = {
     "cancelled": 100,
     "unpublished": 100,
 }
+PUBLISHED_STATUSES = {"submitted", "published"}
 
 
 def _now() -> datetime:
@@ -156,6 +158,11 @@ class PublishAgent:
             errors = [issue["message"] for issue in issues if issue.get("level") == "error"]
             if errors:
                 raise RuntimeError("；".join(errors))
+            self._enforce_daily_limit(
+                publication_id,
+                snapshot,
+                getattr(publisher, "display_name", snapshot.platform),
+            )
 
             platform_lock = self._platform_locks[snapshot.platform]
             if platform_lock.locked():
@@ -292,11 +299,51 @@ class PublishAgent:
             self._append_log(publication, status, message)
             db.commit()
 
+    def _enforce_daily_limit(
+        self,
+        publication_id: str,
+        snapshot: PublishSnapshot,
+        display_name: str,
+    ) -> None:
+        limit = settings.daily_publish_limit
+        if limit <= 0:
+            return
+        start_utc, end_utc, timezone_name = _publish_day_window()
+        with SessionLocal() as db:
+            count = db.scalar(
+                select(func.count()).select_from(PlatformPublication).where(
+                    PlatformPublication.platform == snapshot.platform,
+                    PlatformPublication.status.in_(PUBLISHED_STATUSES),
+                    PlatformPublication.published_at >= start_utc,
+                    PlatformPublication.published_at < end_utc,
+                )
+            ) or 0
+        message = f"今日 {timezone_name} {display_name}账号已提交/发布 {count}/{limit} 条"
+        if count >= limit:
+            raise RuntimeError(f"{message}，已达到每日发布上限，请人工确认后明天再发布或调整上限配置")
+        self._set_status(publication_id, "validating", message)
+
     @staticmethod
     def _append_log(publication: PlatformPublication, status: str, message: str) -> None:
         logs = _json_list(publication.logs_json)
         logs.append({"at": _now().isoformat(), "status": status, "message": message[:1000]})
         publication.logs_json = json.dumps(logs[-100:], ensure_ascii=False)
+
+
+def _publish_day_window() -> tuple[datetime, datetime, str]:
+    try:
+        tz = ZoneInfo(settings.publish_day_timezone)
+        timezone_name = settings.publish_day_timezone
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+        timezone_name = "UTC"
+    start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc),
+        end_local.astimezone(timezone.utc),
+        timezone_name,
+    )
 
 
 publication_agent = PublishAgent()

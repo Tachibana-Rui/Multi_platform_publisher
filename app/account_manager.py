@@ -5,7 +5,12 @@ import threading
 import time
 
 from .config import settings
-from .publishers.browser import PLATFORM_BROWSER_LOCKS, PUBLISH_URLS, _browser_executable
+from .publishers.browser import (
+    PLATFORM_BROWSER_LOCKS,
+    PUBLISH_URLS,
+    _browser_executable,
+    browser_context_options,
+)
 
 
 ACCOUNT_PLATFORMS = ("douyin", "xiaohongshu", "bilibili")
@@ -91,15 +96,17 @@ class AccountManager:
                 context = playwright.chromium.launch_persistent_context(
                     str(profile_dir),
                     executable_path=str(executable),
-                    headless=not visible,
-                    no_viewport=visible,
-                    args=["--start-maximized"] if visible else [],
+                    **browser_context_options(visible=visible, accept_downloads=False),
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
                     page_closed = threading.Event()
                     page.on("close", lambda: page_closed.set())
-                    page.goto(ACCOUNT_URLS[platform], wait_until="domcontentloaded", timeout=90_000)
+                    page.goto(ACCOUNT_URLS[platform], wait_until="load", timeout=90_000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+                    except Exception:
+                        pass
                     timeout = 15 * 60 if visible else 25
                     deadline = time.monotonic() + timeout
                     while time.monotonic() < deadline:

@@ -41,6 +41,7 @@ from .platform_adapter import (
     resolve_selected_assets,
     selected_asset_ids,
     serialize_version,
+    validate_platform_assets,
     validate_platform,
 )
 from .schemas import (
@@ -166,6 +167,7 @@ def save_llm_settings(payload: LLMSettingsUpdate) -> dict:
         api_key=values.get("api_key"),
         model=values.get("model"),
         clear_api_key=values.get("clear_api_key", False),
+        enable_web_search=values.get("enable_web_search"),
     )
 
 
@@ -477,12 +479,27 @@ async def process_batch_import(
             results.append({"url": normalized, "status": "imported", "post": post})
         except HTTPException as exc:
             db.rollback()
+            paused = should_pause_import_batch(exc)
             results.append({
                 "url": raw_url,
                 "status": "failed" if exc.status_code != 409 else "skipped",
                 "error": str(exc.detail),
                 "status_code": exc.status_code,
+                "paused": paused,
             })
+            if paused:
+                if progress_callback:
+                    progress_callback({"results": deepcopy(results), "item_complete": True})
+                return {
+                    "platform": payload.platform,
+                    "total": len(urls),
+                    "imported": sum(item["status"] == "imported" for item in results),
+                    "skipped": sum(item["status"] == "skipped" for item in results),
+                    "failed": sum(item["status"] == "failed" for item in results),
+                    "results": results,
+                    "paused": True,
+                    "error": f"批量导入已暂停：{exc.detail}",
+                }
         except Exception as exc:
             db.rollback()
             results.append({"url": raw_url, "status": "failed", "error": str(exc)[:500]})
@@ -496,6 +513,13 @@ async def process_batch_import(
         "failed": sum(item["status"] == "failed" for item in results),
         "results": results,
     }
+
+
+def should_pause_import_batch(exc: HTTPException) -> bool:
+    detail = str(exc.detail)
+    return exc.status_code in {401, 403, 429} or any(
+        token in detail for token in ("验证码", "安全验证", "登录", "限流", "过于频繁", "429", "已暂停")
+    )
 
 
 @app.post("/api/imports/batch", status_code=207)
@@ -538,10 +562,12 @@ def run_import_job(job_id: str, payload: BatchImportRequest) -> None:
                 result = await process_batch_import(
                     payload, db, lambda update: update_import_job(job_id, update)
                 )
+                paused = bool(result.get("paused"))
                 update_import_job(job_id, {
                     **result,
-                    "status": "completed",
-                    "progress": 100,
+                    "status": "failed" if paused else "completed",
+                    "progress": 100 if not paused else result.get("progress", 0),
+                    "error": result.get("error") if paused else None,
                     "results": result["results"],
                 })
             except Exception as exc:
@@ -636,7 +662,8 @@ def update_platform_version(
 ) -> dict:
     post = get_post_or_404(db, post_id)
     version = get_or_create_version(db, post, platform)
-    resolve_selected_assets(post, payload.selected_asset_ids)
+    assets = resolve_selected_assets(post, payload.selected_asset_ids)
+    validate_platform_assets(platform, assets)
     text_changed = payload.title != version.title or payload.body != version.body
     version.title = payload.title
     version.body = payload.body
@@ -664,6 +691,7 @@ async def generate_platform_version(
         else selected_asset_ids(version)
     )
     assets = resolve_selected_assets(post, requested_ids)
+    validate_platform_assets(platform, assets)
     image_assets = [asset for asset in assets if asset.media_type == "image"][:4]
     generated = await generate_copy(post, platform, image_assets, payload.custom_prompt)
     version.title = generated["title"]
@@ -840,9 +868,8 @@ def build_publication(
         raise HTTPException(status_code=422, detail="该平台已不支持创建发布任务")
     version = get_or_create_version(db, post, platform)
     asset_ids = selected_asset_ids(version)
-    resolve_selected_assets(post, asset_ids)
-    if not asset_ids:
-        raise HTTPException(status_code=422, detail="请先在平台发布窗口中选择素材")
+    assets = resolve_selected_assets(post, asset_ids)
+    validate_platform_assets(platform, assets, require_assets=True)
     active = db.scalar(select(PlatformPublication).where(
         PlatformPublication.post_id == post.id,
         PlatformPublication.platform == platform,

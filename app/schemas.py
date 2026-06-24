@@ -137,6 +137,7 @@ PlatformName = Literal[
 class LLMSettingsUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=8, max_length=1000)
     model: str | None = Field(default=None, min_length=1, max_length=200)
+    enable_web_search: bool | None = None
     clear_api_key: bool = False
 
 
