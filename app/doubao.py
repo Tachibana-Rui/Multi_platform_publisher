@@ -25,7 +25,8 @@ PLATFORM_NAMES = {
 }
 SYSTEM_PROMPT = """你是专业的跨平台社交媒体文案编辑。根据用户提供的角色、标签和图片，为指定平台生成自然、有辨识度且不过度营销的中文标题、正文和标签。
 不得虚构图片中无法确认的信息，不添加站外导流，不使用夸大承诺。
-必须生成正好 5 个与内容相关、适合目标平台的中文标签。正文 body 中不要自行添加标签。
+必须生成正好 5 个与内容相关、适合目标平台的中文标签。若可识别角色、服装和作品，标签应依次优先包含“角色名cos”“角色名服装”“作品名”和“cosplay”；正文 body 中不要自行添加标签。
+用户会明确本次只生成标题、只生成正文或两者都生成；未要求生成的字段必须返回空字符串。
 只输出一个 JSON 对象，格式为 {"title":"标题","body":"正文","tags":["标签1","标签2","标签3","标签4","标签5"]}，不要输出 Markdown 或额外解释。"""
 WEB_SEARCH_PROMPT = """已启用火山方舟 Responses API 的 web_search 工具。当前日期是 {today}。
 如果用户提示、平台文案或图片语境涉及最新资讯、近期趋势、平台规则、热门话题、IP/角色/作品近况或其他时效性信息，先使用联网搜索核实，再生成文案；无法确认的信息不要编造。"""
@@ -35,6 +36,70 @@ GENERIC_TAGS = {
     "cos", "cosplay", "正片", "二次元", "摄影", "人像", "写真", "角色扮演",
     "场照", "漫展", "返图",
 }
+
+OUTFIT_PATTERN = re.compile(
+    r"(?:灵装|礼服|制服|校服|兔女郎|婚纱|泳装|旗袍|和服|军装|战袍|常服|私服|皮肤|服装|装扮|套装|时装|造型)"
+)
+WORK_PATTERN = re.compile(
+    r"(?:大作战|[之的]?[战传记篇部集]|物语|计划|系列|宇宙|[A-Za-z].*[A-Za-z])$",
+    re.IGNORECASE,
+)
+
+
+def _clean_tag(value: object) -> str:
+    return re.sub(r"\s+", "", str(value).strip().lstrip("#＃"))[:30]
+
+
+def _strip_cos_suffix(value: str) -> str:
+    return re.sub(r"(?:cosplay|cos|正片)$", "", value, flags=re.IGNORECASE).strip()
+
+
+def _prioritized_cosplay_tags(post: Post) -> list[str]:
+    """Derive stable cosplay tag priorities from the source metadata when possible."""
+    source_tags = [_clean_tag(tag.name) for tag in post.tags]
+    source_tags = list(dict.fromkeys(tag for tag in source_tags if tag))
+    source_text = f"{post.title} {post.body}".casefold()
+    candidates = [
+        tag for tag in source_tags
+        if tag.casefold() not in GENERIC_TAGS and not re.fullmatch(r"[A-Za-z0-9:_-]+", tag)
+    ]
+    character = next((
+        _strip_cos_suffix(tag) for tag in source_tags
+        if _strip_cos_suffix(tag)
+        and re.search(r"(?:cosplay|cos|正片)$", tag, re.IGNORECASE)
+        and _strip_cos_suffix(tag).casefold() not in GENERIC_TAGS
+    ), None)
+    if not character:
+        character = next((
+            tag for tag in candidates
+            if tag.casefold() in source_text and not OUTFIT_PATTERN.search(tag) and not WORK_PATTERN.search(tag)
+        ), None)
+    if not character:
+        character = next((
+            tag for tag in candidates
+            if not OUTFIT_PATTERN.search(tag) and not WORK_PATTERN.search(tag)
+        ), None)
+
+    outfit = next((
+        tag[len(character):] for tag in candidates
+        if character and tag.startswith(character) and OUTFIT_PATTERN.search(tag[len(character):])
+    ), None)
+    if not outfit:
+        outfit = next((tag for tag in candidates if OUTFIT_PATTERN.search(tag)), None)
+    work = next((
+        tag for tag in candidates
+        if tag != character and tag != outfit and WORK_PATTERN.search(tag)
+    ), None)
+
+    priorities: list[str] = []
+    if character:
+        priorities.append(f"{character}cos")
+        if outfit:
+            priorities.append(f"{character}{_strip_cos_suffix(outfit)}")
+    if work:
+        priorities.append(work)
+    priorities.append("cosplay")
+    return list(dict.fromkeys(_clean_tag(tag) for tag in priorities if _clean_tag(tag)))
 
 
 def _content_keywords(post: Post) -> list[str]:
@@ -68,13 +133,29 @@ def _content_keywords(post: Post) -> list[str]:
 
 
 def build_generation_prompt(
-    post: Post, platform: str, image_count: int, custom_prompt: str | None = None
+    post: Post,
+    platform: str,
+    image_count: int,
+    custom_prompt: str | None = None,
+    *,
+    generate_title: bool = True,
+    generate_body: bool = True,
 ) -> str:
+    if not generate_title and not generate_body:
+        raise ValueError("请至少选择生成标题或生成正文")
     if custom_prompt and custom_prompt.strip():
-        return custom_prompt.strip()
-    keywords = _content_keywords(post)
-    keyword_text = " ".join(keywords) or post.title or "cos作品"
-    return f"生成 {keyword_text} {PLATFORM_NAMES.get(platform, platform)} 标题和文案，并生成5个相关标签追加在正文末尾。"
+        prompt = custom_prompt.strip()
+    else:
+        keywords = _content_keywords(post)
+        keyword_text = " ".join(keywords) or post.title or "cos作品"
+        prompt = f"生成 {keyword_text} {PLATFORM_NAMES.get(platform, platform)} 标题和文案，并生成5个相关标签追加在正文末尾。"
+    if generate_title and generate_body:
+        return prompt
+    target = "标题" if generate_title else "正文"
+    untouched = "正文" if generate_title else "标题"
+    if f"本次仅生成{target}" in prompt:
+        return prompt
+    return f"{prompt}\n\n本次仅生成{target}；{untouched}必须返回空字符串。"
 
 
 def _image_data_url(asset: MediaAsset) -> str:
@@ -137,6 +218,10 @@ def _parse_copy(
     content: object,
     fallback_tags: list[str] | None = None,
     platform: str | None = None,
+    priority_tags: list[str] | None = None,
+    require_title: bool = True,
+    require_body: bool = True,
+    append_tags_to_body: bool = True,
 ) -> dict:
     if isinstance(content, list):
         content = "".join(
@@ -153,27 +238,31 @@ def _parse_copy(
         raise HTTPException(status_code=502, detail="豆包没有返回有效的 JSON 文案") from exc
     title = str(payload.get("title") or "").strip()
     body = str(payload.get("body") or payload.get("caption") or "").strip()
-    if not title and not body:
-        raise HTTPException(status_code=502, detail="豆包返回的标题和正文均为空")
+    if require_title and not title:
+        raise HTTPException(status_code=502, detail="豆包没有返回标题")
+    if require_body and not body:
+        raise HTTPException(status_code=502, detail="豆包没有返回正文")
     raw_tags = payload.get("tags") or payload.get("hashtags") or []
     if isinstance(raw_tags, str):
         raw_tags = re.split(r"[,，\s]+", raw_tags)
     if not isinstance(raw_tags, list):
         raw_tags = []
-    candidates = [*raw_tags, *re.findall(r"#([^#\s]+)", body), *(fallback_tags or [])]
+    candidates = [*(priority_tags or []), *raw_tags, *re.findall(r"#([^#\s]+)", body), *(fallback_tags or [])]
     candidates.extend([
         PLATFORM_NAMES.get(platform or "", ""), "原创内容", "摄影分享", "内容创作", "生活记录", "灵感分享",
     ])
     tags: list[str] = []
     seen: set[str] = set()
     for value in candidates:
-        tag = re.sub(r"\s+", "", str(value).strip().lstrip("#"))[:30]
+        tag = _clean_tag(value)
         key = tag.casefold()
         if tag and key not in seen:
             seen.add(key)
             tags.append(tag)
         if len(tags) == 5:
             break
+    if not append_tags_to_body:
+        return {"title": title[:300], "body": body[:100_000], "tags": tags}
     tag_line = " ".join(f"#{tag}" for tag in tags)
     body_without_trailing_tags = re.sub(r"(?:\s*#[^#\s]+){1,}\s*$", "", body).rstrip()
     available = max(0, 100_000 - len(tag_line) - (2 if body_without_trailing_tags else 0))
@@ -289,11 +378,17 @@ async def generate_copy(
     platform: str,
     assets: list[MediaAsset],
     custom_prompt: str | None = None,
+    *,
+    generate_title: bool = True,
+    generate_body: bool = True,
 ) -> dict:
     llm = get_private_settings()
     if not llm["api_key"]:
         raise HTTPException(status_code=422, detail="请先在 AI 配置中填写豆包 API Key")
-    prompt = build_generation_prompt(post, platform, len(assets[:4]), custom_prompt)
+    prompt = build_generation_prompt(
+        post, platform, len(assets[:4]), custom_prompt,
+        generate_title=generate_title, generate_body=generate_body,
+    )
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(90.0)) as client:
             if llm.get("enable_web_search", True):
@@ -357,6 +452,10 @@ async def generate_copy(
             content,
             fallback_tags=[tag.name for tag in post.tags],
             platform=platform,
+            priority_tags=_prioritized_cosplay_tags(post),
+            require_title=generate_title,
+            require_body=generate_body,
+            append_tags_to_body=generate_body,
         ),
         "prompt": prompt,
         "model": model_label,

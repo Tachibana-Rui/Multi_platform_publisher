@@ -17,7 +17,7 @@ from .publishers.base import PublicationCancelled, PublishAsset, PublishSnapshot
 
 
 ACTIVE_STATUSES = {
-    "pending", "queued", "validating", "awaiting_login", "preparing", "review_pending", "publishing"
+    "pending", "queued", "validating", "awaiting_login", "preparing", "review_pending", "publishing", "scheduling"
 }
 PUBLICATION_PROGRESS = {
     "pending": 5,
@@ -27,13 +27,15 @@ PUBLICATION_PROGRESS = {
     "preparing": 55,
     "review_pending": 75,
     "publishing": 90,
+    "scheduling": 90,
     "submitted": 100,
+    "scheduled": 100,
     "published": 100,
     "failed": 100,
     "cancelled": 100,
     "unpublished": 100,
 }
-PUBLISHED_STATUSES = {"submitted", "published"}
+PUBLISHED_STATUSES = {"submitted", "scheduled", "published"}
 
 
 def _now() -> datetime:
@@ -69,6 +71,7 @@ def serialize_publication(publication: PlatformPublication) -> dict:
         "platform_url": publication.platform_url,
         "attempt_count": publication.attempt_count,
         "prepared_at": publication.prepared_at,
+        "scheduled_at": publication.scheduled_at,
         "published_at": publication.published_at,
         "created_at": publication.created_at,
         "updated_at": publication.updated_at,
@@ -239,6 +242,7 @@ class PublishAgent:
                 title=publication.title,
                 body=publication.body,
                 assets=publish_assets,
+                scheduled_at=publication.scheduled_at,
             )
 
     def _set_status(
@@ -286,7 +290,10 @@ class PublishAgent:
         if result.get("manual"):
             message = "检测到用户已在平台页面完成发布"
         else:
-            message = "平台已确认接收作品" if status == "published" else "已点击发布，等待平台处理或审核"
+            if status == "scheduled":
+                message = "平台已确认原生定时发布，等待平台在预约时间发布"
+            else:
+                message = "平台已确认接收作品" if status == "published" else "已点击发布，等待平台处理或审核"
         with SessionLocal() as db:
             publication = db.get(PlatformPublication, publication_id)
             if not publication:
@@ -294,7 +301,11 @@ class PublishAgent:
             publication.status = status
             publication.platform_url = result.get("platform_url")
             publication.platform_item_id = result.get("platform_item_id")
-            publication.published_at = _now()
+            if status == "scheduled":
+                publication.scheduled_at = result.get("scheduled_at") or publication.scheduled_at
+                publication.published_at = None
+            else:
+                publication.published_at = _now()
             publication.error_message = None
             self._append_log(publication, status, message)
             db.commit()

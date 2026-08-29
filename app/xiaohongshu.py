@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from collections.abc import Callable
-import hashlib
-import json
-import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 import random
 import re
 import shutil
+import time
 from urllib.parse import urljoin, urlparse
 
 from fastapi import HTTPException
-import httpx
 from yt_dlp.utils import js_to_json
+import json
 
 from .assets import inspect_media
 from .config import settings
@@ -25,10 +23,6 @@ MEDIA_HOSTS = ("xhscdn.com", "xhscdn.net", "xiaohongshu.com")
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 PAUSE_STATUSES = {401, 403, 429}
 TRANSIENT_STATUSES = {408, 500, 502, 503, 504}
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
-)
 
 
 @dataclass(frozen=True)
@@ -93,6 +87,8 @@ def _balanced_object(source: str, start: int) -> str:
 def _find_note(initial_state: dict, source_url: str) -> tuple[str, dict]:
     path_match = re.search(r"/(?:explore|discovery/item)/([\da-f]+)", urlparse(source_url).path)
     expected_id = path_match.group(1) if path_match else None
+
+    # 1. 优先从 noteDetailMap 查找
     detail_map = initial_state.get("note", {}).get("noteDetailMap", {})
     if expected_id and isinstance(detail_map.get(expected_id), dict):
         note = detail_map[expected_id].get("note")
@@ -102,6 +98,43 @@ def _find_note(initial_state: dict, source_url: str) -> tuple[str, dict]:
         note = value.get("note") if isinstance(value, dict) else None
         if isinstance(note, dict) and note:
             return str(note.get("noteId") or key), note
+
+    # 2. 从 feed.feeds 列表查找（页面可能通过 feed 方式渲染）
+    feeds = initial_state.get("feed", {}).get("feeds", [])
+    if isinstance(feeds, list):
+        for item in feeds:
+            if not isinstance(item, dict):
+                continue
+            note_candidate = item.get("note") if isinstance(item.get("note"), dict) else item
+            if "noteId" in note_candidate and "title" in note_candidate:
+                if expected_id and str(note_candidate.get("noteId")) == expected_id:
+                    return expected_id, note_candidate
+                if not expected_id and note_candidate:
+                    return str(note_candidate.get("noteId")), note_candidate
+
+    # 3. 递归搜索整个 state，找到包含 noteId 和 media/imageList 的对象
+    def _recursive_search(obj: object, depth: int = 0):
+        if depth > 6:
+            return None
+        if isinstance(obj, dict):
+            if (isinstance(obj.get("noteId"), str) and len(str(obj.get("noteId"))) >= 10 and
+                (isinstance(obj.get("imageList"), list) or isinstance(obj.get("video"), dict))):
+                return obj
+            for v in obj.values():
+                result = _recursive_search(v, depth + 1)
+                if result is not None:
+                    return result
+        elif isinstance(obj, list):
+            for item in obj:
+                result = _recursive_search(item, depth + 1)
+                if result is not None:
+                    return result
+        return None
+
+    found = _recursive_search(initial_state)
+    if found:
+        return str(found.get("noteId")), found
+
     raise ValueError("note detail is absent")
 
 
@@ -144,7 +177,20 @@ def parse_note_page(html: str, source_url: str) -> ParsedNote:
         raw_state = _balanced_object(html, object_start)
         initial_state = json.loads(js_to_json(raw_state))
         note_id, note = _find_note(initial_state, source_url)
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+    except ValueError:
+        # 检查是否为404/权限错误页面
+        detail_map = {}
+        try:
+            detail_map = initial_state.get("note", {}).get("noteDetailMap", {})
+        except Exception:
+            detail_map = {}
+        if isinstance(detail_map, dict) and len(detail_map) == 0:
+            raise HTTPException(
+                status_code=403,
+                detail="该笔记不可公开访问（可能仅本人可见、已删除或需要登录小红书账号）。请在浏览器中打开该链接确认是否能公开访问。",
+            )
+        raise HTTPException(status_code=422, detail="无法解析小红书作品页面数据")
+    except (TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=422, detail="无法解析小红书作品页面数据") from exc
 
     media: list[MediaSource] = []
@@ -195,38 +241,6 @@ def parse_note_page(html: str, source_url: str) -> ParsedNote:
     )
 
 
-async def _fetch_page(client: httpx.AsyncClient, source_url: str) -> tuple[str, str]:
-    current = source_url
-    for _ in range(6):
-        if not _host_allowed(urlparse(current).hostname, PAGE_HOSTS):
-            raise HTTPException(status_code=422, detail="小红书短链跳转到了不受信任的地址")
-        try:
-            response = await client.get(current, follow_redirects=False)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="连接小红书失败，请稍后重试") from exc
-        if response.status_code in REDIRECT_STATUSES:
-            location = response.headers.get("location")
-            if not location:
-                break
-            current = urljoin(current, location)
-            continue
-        if response.status_code != 200:
-            if response.status_code in PAUSE_STATUSES:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=(
-                        f"小红书页面返回状态 {response.status_code}，可能需要登录、验证码"
-                        "或请求过于频繁，已暂停导入"
-                    ),
-                )
-            raise HTTPException(
-                status_code=502,
-                detail=f"小红书页面返回状态 {response.status_code}，作品可能需要登录或已不可见",
-            )
-        return str(response.url), response.text
-    raise HTTPException(status_code=422, detail="小红书短链跳转次数过多")
-
-
 def _extension(content_type: str, url: str, media_type: str) -> str:
     normalized = content_type.split(";", 1)[0].lower()
     overrides = {
@@ -239,101 +253,7 @@ def _extension(content_type: str, url: str, media_type: str) -> str:
     suffix = Path(urlparse(url).path).suffix.lower()
     if suffix and len(suffix) <= 6:
         return suffix
-    guessed = mimetypes.guess_extension(normalized)
-    return guessed or (".mp4" if media_type == "video" else ".jpg")
-
-
-async def _download_media(
-    client: httpx.AsyncClient,
-    source: MediaSource,
-    target_dir: Path,
-    position: int,
-    referer: str,
-) -> tuple[dict, Path]:
-    last_error: HTTPException | None = None
-    for attempt in range(1, settings.import_media_retry_attempts + 1):
-        try:
-            return await _download_media_once(client, source, target_dir, position, referer)
-        except HTTPException as exc:
-            if _should_pause_import(exc) or not _should_retry_download(exc) or attempt >= settings.import_media_retry_attempts:
-                raise
-            last_error = exc
-            await asyncio.sleep(min(8.0, 0.8 * attempt + random.uniform(0.2, 0.8)))
-    if last_error:
-        raise last_error
-    raise HTTPException(status_code=502, detail=f"第 {position} 个媒体文件下载失败")
-
-
-async def _download_media_once(
-    client: httpx.AsyncClient,
-    source: MediaSource,
-    target_dir: Path,
-    position: int,
-    referer: str,
-) -> tuple[dict, Path]:
-    current = source.url
-    for _ in range(5):
-        if not _host_allowed(urlparse(current).hostname, MEDIA_HOSTS):
-            raise HTTPException(status_code=422, detail="作品媒体地址不受信任")
-        try:
-            async with client.stream(
-                "GET", current, headers={"Referer": referer}, follow_redirects=False
-            ) as response:
-                if response.status_code in REDIRECT_STATUSES:
-                    location = response.headers.get("location")
-                    if not location:
-                        break
-                    current = urljoin(current, location)
-                    continue
-                if response.status_code != 200:
-                    if response.status_code in PAUSE_STATUSES:
-                        raise HTTPException(
-                            status_code=response.status_code,
-                            detail=(
-                                f"第 {position} 个媒体文件返回状态 {response.status_code}，"
-                                "可能触发登录、验证码或限流，已暂停导入"
-                            ),
-                        )
-                    status_code = 502 if response.status_code in TRANSIENT_STATUSES else 422
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail=f"第 {position} 个媒体文件返回状态 {response.status_code}",
-                    )
-                mime_type = response.headers.get("content-type", "application/octet-stream")
-                if mime_type.startswith("text/"):
-                    raise HTTPException(status_code=422, detail=f"第 {position} 个媒体文件返回了无效内容")
-                suffix = _extension(mime_type, current, source.media_type)
-                filename = f"{position:02d}_{source.label}{suffix}"
-                target = target_dir / filename
-                digest = hashlib.sha256()
-                size = 0
-                with target.open("wb") as output:
-                    async for chunk in response.aiter_bytes(1024 * 1024):
-                        size += len(chunk)
-                        if size > settings.max_upload_bytes:
-                            raise HTTPException(status_code=413, detail=f"第 {position} 个媒体文件过大")
-                        digest.update(chunk)
-                        output.write(chunk)
-                width, height, duration = inspect_media(target, source.media_type)
-                return ({
-                    "original_name": filename,
-                    "storage_name": "",  # Set by the caller after path normalization.
-                    "media_type": source.media_type,
-                    "mime_type": mime_type.split(";", 1)[0],
-                    "file_size": size,
-                    "checksum": digest.hexdigest(),
-                    "width": width,
-                    "height": height,
-                    "duration_seconds": duration,
-                    "position": position - 1,
-                }, target)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"第 {position} 个媒体文件下载中断") from exc
-    raise HTTPException(status_code=422, detail="媒体地址跳转次数过多")
-
-
-def _should_retry_download(exc: HTTPException) -> bool:
-    return exc.status_code in {502, 503, 504}
+    return ".mp4" if media_type == "video" else ".jpg"
 
 
 def _should_pause_import(exc: HTTPException) -> bool:
@@ -343,13 +263,127 @@ def _should_pause_import(exc: HTTPException) -> bool:
     )
 
 
-async def _wait_between_media_downloads() -> None:
+def _wait_between_media_downloads() -> None:
     delay = random.uniform(
         settings.import_media_delay_min_seconds,
         settings.import_media_delay_max_seconds,
     )
     if delay > 0:
-        await asyncio.sleep(delay)
+        time.sleep(delay)
+
+
+# -----------------------------------------------------------------------------
+# 浏览器级下载入口
+# -----------------------------------------------------------------------------
+
+def _download_with_browser(
+    source_url: str,
+    post_id: str,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> tuple[str, ParsedNote, list[dict]]:
+    """使用 Playwright 浏览器级反检测下载小红书作品。
+
+    与原 httpx 实现的主要差异：
+    - 使用真实浏览器栈（TLS/HTTP/HTTP2 指纹与 Chrome 完全一致）
+    - 自动注入反检测脚本（navigator.webdriver、window.chrome 等）
+    - 使用 RequestHeaderTracker 动态跟踪页面导航与 Referer
+    - 使用与发布系统一致的设备指纹配置
+    """
+    source_url = normalize_source_url(source_url)
+    target_dir = settings.upload_dir / post_id / "downloads"
+    target_dir.mkdir(parents=True, exist_ok=False)
+
+    def report(payload: dict) -> None:
+        if progress_callback:
+            try:
+                progress_callback(payload)
+            except Exception:
+                pass
+
+    try:
+        # 延迟导入浏览器下载管理器，避免在非下载场景下启动 Playwright
+        from .browser_downloader import BrowserDownloadSession
+
+        total_size = 0
+        with BrowserDownloadSession(
+            browser_type="chrome",
+            profile_subdir="xiaohongshu",
+            progress_callback=progress_callback,
+        ) as session:
+            page = session.fetch_page(source_url, wait_until="domcontentloaded")
+            canonical_url = page.canonical_url
+            # 优先用原始URL作为source_url传递给解析器（确保expected_id正确匹配）
+            # 仅当原始URL无法提取note ID时，才用canonical_url
+            try:
+                note = parse_note_page(page.html, source_url)
+            except ValueError:
+                note = parse_note_page(page.html, canonical_url)
+
+            image_total = sum(1 for source in note.media if source.media_type == "image")
+            image_downloaded = 0
+            report({
+                "post_name": note.title,
+                "image_downloaded": 0,
+                "image_total": image_total,
+            })
+
+            assets: list[dict] = []
+            for position, source in enumerate(note.media, start=1):
+                if position > 1:
+                    _wait_between_media_downloads()
+                suffix = _extension("", source.url, source.media_type)
+                filename = f"{position:02d}_{source.label}{suffix}"
+                downloaded = session.download_media(
+                    source.url,
+                    target_dir=target_dir,
+                    filename=filename,
+                    media_type=source.media_type,
+                    allowed_hosts=MEDIA_HOSTS,
+                    referer=canonical_url,
+                )
+                path = target_dir / downloaded.original_name
+                # 修正：重新从文件读取以确保元数据一致性
+                # 这里我们用 inspect_media 检查并获得更精确的宽高
+                width, height, duration = inspect_media(path, source.media_type)
+                total_size += downloaded.file_size
+                if total_size > settings.max_import_total_bytes:
+                    raise HTTPException(status_code=413, detail="作品媒体文件总大小超过导入限制")
+
+                asset_dict = {
+                    "original_name": downloaded.original_name[:255],
+                    "storage_name": path.relative_to(settings.upload_dir).as_posix(),
+                    "media_type": source.media_type,
+                    "mime_type": downloaded.mime_type,
+                    "file_size": downloaded.file_size,
+                    "checksum": downloaded.checksum,
+                    "width": width,
+                    "height": height,
+                    "duration_seconds": duration,
+                    "position": position - 1,
+                }
+                assets.append(asset_dict)
+                if source.media_type == "image":
+                    image_downloaded += 1
+                report({
+                    "post_name": note.title,
+                    "image_downloaded": image_downloaded,
+                    "image_total": image_total,
+                })
+        return canonical_url, note, assets
+    except HTTPException:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        try:
+            target_dir.parent.rmdir()
+        except OSError:
+            pass
+        raise
+    except Exception as exc:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        try:
+            target_dir.parent.rmdir()
+        except OSError:
+            pass
+        raise HTTPException(status_code=502, detail=f"下载失败：{type(exc).__name__}") from exc
 
 
 async def import_public_note(
@@ -357,50 +391,13 @@ async def import_public_note(
     post_id: str,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> tuple[str, ParsedNote, list[dict]]:
-    source_url = normalize_source_url(source_url)
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    target_dir = settings.upload_dir / post_id / "downloads"
-    target_dir.mkdir(parents=True, exist_ok=False)
-    total_size = 0
-    try:
-        async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(45.0)) as client:
-            canonical_url, html = await _fetch_page(client, source_url)
-            note = parse_note_page(html, canonical_url)
-            image_total = sum(source.media_type == "image" for source in note.media)
-            image_downloaded = 0
-            if progress_callback:
-                progress_callback({
-                    "post_name": note.title,
-                    "image_downloaded": image_downloaded,
-                    "image_total": image_total,
-                })
-            assets: list[dict] = []
-            for position, source in enumerate(note.media, start=1):
-                if position > 1:
-                    await _wait_between_media_downloads()
-                details, path = await _download_media(client, source, target_dir, position, canonical_url)
-                total_size += details["file_size"]
-                if total_size > settings.max_import_total_bytes:
-                    raise HTTPException(status_code=413, detail="作品媒体文件总大小超过导入限制")
-                details["storage_name"] = path.relative_to(settings.upload_dir).as_posix()
-                assets.append(details)
-                if source.media_type == "image":
-                    image_downloaded += 1
-                if progress_callback:
-                    progress_callback({
-                        "post_name": note.title,
-                        "image_downloaded": image_downloaded,
-                        "image_total": image_total,
-                    })
-            return canonical_url, note, assets
-    except Exception:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        try:
-            target_dir.parent.rmdir()
-        except OSError:
-            pass
-        raise
+    """异步包装器——在工作线程中运行同步的浏览器下载逻辑。
+
+    Playwright 的同步 API 在 asyncio 内使用，需要通过 to_thread 隔离事件循环。
+    """
+    return await asyncio.to_thread(
+        _download_with_browser,
+        source_url,
+        post_id,
+        progress_callback,
+    )

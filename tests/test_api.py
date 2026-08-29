@@ -411,6 +411,44 @@ def test_video_platform_version_defaults_to_single_video_and_rejects_mixed_media
         assert "混合图片和视频" in mixed.json()["detail"]
 
 
+def test_asset_reorder_updates_platform_versions_and_publication_snapshot(monkeypatch):
+    monkeypatch.setattr("app.main.publication_agent.start", lambda _publication_id: True)
+    with TestClient(app) as client:
+        post = client.post("/api/posts", json={"title": "排序发布", "body": "按图片顺序上传"}).json()
+        post = client.post(
+            f"/api/posts/{post['id']}/assets",
+            files=[
+                ("files", ("first.png", make_png(), "image/png")),
+                ("files", ("second.png", make_png(), "image/png")),
+                ("files", ("third.png", make_png(), "image/png")),
+            ],
+        ).json()
+        first, second, third = [asset["id"] for asset in post["assets"]]
+        saved = client.put(
+            f"/api/posts/{post['id']}/platform-versions/douyin",
+            json={"title": "抖音标题", "body": "抖音正文", "selected_asset_ids": [first, second, third]},
+        )
+        assert saved.status_code == 200
+
+        reordered = client.put(
+            f"/api/posts/{post['id']}/assets/order",
+            json={"asset_ids": [third, first, second]},
+        )
+        assert reordered.status_code == 200
+        assert [asset["id"] for asset in reordered.json()["assets"]] == [third, first, second]
+        assert [asset["position"] for asset in reordered.json()["assets"]] == [0, 1, 2]
+
+        version = client.get(f"/api/posts/{post['id']}/platform-versions/douyin").json()
+        assert version["selected_asset_ids"] == [third, first, second]
+
+        publication = client.post(
+            "/api/publications",
+            json={"post_id": post["id"], "platform": "douyin"},
+        )
+        assert publication.status_code == 201
+        assert publication.json()["asset_ids"] == [third, first, second]
+
+
 def test_publication_snapshots_version_and_requires_final_review(monkeypatch):
     started = []
     confirmed = []

@@ -162,6 +162,10 @@
           <label class="field"><span>谁可以看</span>
             <select id="queueVisibility"><option value="public">公开可见</option><option value="friends">仅互关好友可见</option><option value="private">仅自己可见</option></select>
           </label>
+          <label class="field"><span>平台原生定时发布（可选）</span>
+            <input id="queueScheduledAt" type="datetime-local">
+            <small class="field-help">留空为立即发布；设置后由各平台创作中心自身的定时发布功能执行。</small>
+          </label>
           <button class="primary-button queue-start-button" id="startBatchPublishButton" type="button">加入多平台发布队列</button>
         </section>
         <section class="queue-tasks">
@@ -294,6 +298,9 @@
                 <option value="private">仅自己可见</option>
               </select>
             </label>
+            <label><span>平台原生定时发布</span>
+              <input id="publicationScheduledAt" type="datetime-local">
+            </label>
             <span class="copy-source" id="copySourceBadge">原文复制</span>
             </div>
             <label class="field">
@@ -330,6 +337,14 @@
           </div>
           <div class="generation-row">
             <div class="llm-readiness" id="llmReadiness"><span></span><p>正在检查豆包配置…</p></div>
+            <div class="platform-copy-sync-action">
+              <button class="sync-platform-copy-button" id="syncPlatformCopyButton" type="button">↺ 同步其他平台文案</button>
+              <div class="platform-copy-sync-menu" id="platformCopySyncMenu" hidden></div>
+            </div>
+            <div class="generation-options" role="group" aria-label="选择生成内容">
+              <label><input id="generateTitle" type="checkbox" checked> 生成标题</label>
+              <label><input id="generateBody" type="checkbox" checked> 生成正文</label>
+            </div>
             <button class="generate-button" id="generateCopyButton" type="button">✦ 一键生成</button>
           </div>
         </section>

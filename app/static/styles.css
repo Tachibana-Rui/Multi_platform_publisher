@@ -215,9 +215,11 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .account-state.logged_in { color: #277052; background: #daf2e5; }
 .account-state.not_logged_in, .account-state.error { color: #a0493a; background: #fae5e0; }
 .account-state.checking, .account-state.awaiting_login { color: #7656b7; background: #ece5fa; }
-.account-card-action { grid-column: 2 / 4; display: flex; align-items: center; min-height: 30px; }
+.account-card-action { grid-column: 2 / 4; display: flex; align-items: center; gap: 8px; min-height: 30px; }
 .account-login-button { padding: 8px 12px; border: 0; border-radius: 8px; color: white; background: #303733; font-size: 10px; font-weight: 750; }
 .account-login-button:disabled { opacity: .5; cursor: wait; }
+.account-reset-button { padding: 8px 12px; border: 1px solid #d97a6b; border-radius: 8px; color: #a0493a; background: #fff3ef; font-size: 10px; font-weight: 750; }
+.account-reset-button:disabled { opacity: .5; cursor: wait; }
 .account-ready-mark { color: #2d7658; font-size: 10px; font-weight: 750; }
 .account-footer-note { color: #969b95; font-size: 9px; }
 .management-modal { width: min(calc(100vw - 48px), 2360px); }
@@ -325,6 +327,17 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .official-edit-note strong { display: block; margin-bottom: 4px; font-size: 10px; }
 .official-edit-note p { margin: 0; font-size: 9px; line-height: 1.55; }
 .generation-row { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 28px 18px; border-top: 1px solid var(--line); background: #fbfbf8; }
+.platform-copy-sync-action { position: relative; margin-left: auto; }
+.sync-platform-copy-button { padding: 8px 10px; border: 1px solid #cbd8d0; border-radius: 8px; color: #3f6851; background: #fff; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.sync-platform-copy-button:hover { border-color: #83aa94; background: #f4faf5; }
+.sync-platform-copy-button:disabled { opacity: .55; cursor: wait; }
+.platform-copy-sync-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 5; display: grid; min-width: 185px; gap: 6px; padding: 9px; border: 1px solid #d7ddd6; border-radius: 10px; background: white; box-shadow: 0 12px 28px rgba(36,48,40,.16); }
+.platform-copy-sync-menu strong { padding: 1px 3px 4px; color: #6d766e; font-size: 9px; }
+.platform-copy-sync-menu button { padding: 8px 9px; border: 0; border-radius: 7px; color: #35463b; background: #f3f6f2; font-size: 10px; text-align: left; }
+.platform-copy-sync-menu button:hover { background: #e5f0e8; }
+.generation-options { display: flex; align-items: center; gap: 12px; color: #575d56; font-size: 10px; font-weight: 650; }
+.generation-options label { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; cursor: pointer; }
+.generation-options input { width: 14px; height: 14px; margin: 0; accent-color: #665fee; }
 .llm-readiness { display: flex; align-items: center; gap: 8px; color: #858a83; }
 .llm-readiness.warning { cursor: pointer; }
 .llm-readiness span { width: 7px; height: 7px; border-radius: 50%; background: #b1b4ae; }
@@ -360,7 +373,7 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .publication-heading strong { font-size: 11px; }
 .publication-status { padding: 4px 7px; border-radius: 999px; color: #6f756f; background: #eceeea; font-size: 9px; font-weight: 750; }
 .publication-status.review_pending { color: #825718; background: #fff0ce; }
-.publication-status.published, .publication-status.submitted { color: #276e50; background: #def3e7; }
+.publication-status.published, .publication-status.submitted, .publication-status.scheduled { color: #276e50; background: #def3e7; }
 .publication-status.failed { color: #a54335; background: #fbe5e0; }
 .publication-status.unpublished { color: #656b65; background: #e8ebe7; }
 .review-callout { padding: 9px; border-radius: 8px; color: #785b2c; background: #fff7e7; font-size: 10px; line-height: 1.5; }
@@ -476,8 +489,14 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .match-actions .secondary-button { padding: 8px 11px; font-size: 10px; white-space: nowrap; }
 .match-action-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .manual-match-button { color: #695020; border-color: #e3cf9f; background: #fff8e9; }
-.asset-item { display: grid; align-items: center; grid-template-columns: 42px minmax(120px,.75fr) minmax(220px,1.35fr) 28px 28px; gap: 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 9px; background: white; }
-.asset-item.pending-asset { grid-template-columns: 42px minmax(0,1fr) 28px; }
+.asset-item { display: grid; align-items: center; grid-template-columns: 24px 42px minmax(120px,.75fr) minmax(220px,1.35fr) 28px 28px; gap: 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 9px; background: white; }
+.asset-item.pending-asset { grid-template-columns: 24px 42px minmax(0,1fr) 28px; }
+.asset-item.drag-source { opacity: .45; }
+.asset-item.drag-over { border-color: rgba(239,106,76,.72); box-shadow: inset 0 2px 0 rgba(239,106,76,.72); }
+.asset-item.drag-over-after { box-shadow: inset 0 -2px 0 rgba(239,106,76,.72); }
+.asset-drag-handle { display: grid; width: 24px; height: 32px; place-items: center; border-radius: 6px; color: #a3a8a1; cursor: grab; user-select: none; }
+.asset-drag-handle:hover { color: var(--accent); background: #f5f0ec; }
+.asset-item:active .asset-drag-handle { cursor: grabbing; }
 .asset-thumb { display: grid; overflow: hidden; width: 42px; height: 42px; place-items: center; border-radius: 6px; color: #777; background: #e9ebe7; font-size: 15px; }
 .asset-thumb[type="button"] { padding: 0; border: 0; cursor: zoom-in; }
 .asset-thumb[type="button"]:hover { box-shadow: 0 0 0 2px rgba(57,135,104,.28); }
@@ -487,7 +506,7 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .asset-copy strong { margin-bottom: 3px; font-size: 10px; }
 .asset-copy small { color: #9a9d97; font-size: 10px; }
 .asset-match-info { min-width: 0; padding-left: 11px; border-left: 1px solid var(--line); overflow: hidden; }
-.asset-item:not(.pending-asset) .asset-match-info { grid-column: 3; grid-row: 1; }
+.asset-item:not(.pending-asset) .asset-match-info { grid-column: 4; grid-row: 1; }
 .asset-match-info strong, .asset-match-info small, .asset-match-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-match-info strong { margin-bottom: 3px; color: #465149; font-size: 11px; }
 .asset-match-info small { color: #7f8780; font-size: 10px; }
@@ -498,13 +517,13 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .asset-match-path { margin-top: 3px; color: #8e948d; font-size: 10px; }
 .asset-match-confirm { margin-left: 5px; padding: 2px 6px; border: 1px solid #d9b875; border-radius: 5px; color: #875b19; background: #fff8e8; font-size: 10px; }
 .asset-match-status { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 50%; color: white; font-size: 13px; font-weight: 800; line-height: 1; }
-.asset-item:not(.pending-asset) .asset-match-status { grid-column: 4; grid-row: 1; }
+.asset-item:not(.pending-asset) .asset-match-status { grid-column: 5; grid-row: 1; }
 .asset-match-status.matched { background: #398768; box-shadow: 0 3px 8px rgba(57,135,104,.2); }
 .asset-match-status.unmatched { background: #d45e4b; box-shadow: 0 3px 8px rgba(212,94,75,.18); }
 .asset-match-status.review { background: #d69a3e; }
 .asset-match-status.idle { color: #969b95; background: #eceeea; }
 .remove-asset { width: 28px; height: 28px; border: 0; border-radius: 50%; color: #aaa; background: transparent; font-size: 15px; }
-.asset-item:not(.pending-asset) .remove-asset { grid-column: 5; grid-row: 1; }
+.asset-item:not(.pending-asset) .remove-asset { grid-column: 6; grid-row: 1; }
 .remove-asset:hover { color: var(--accent); }
 .editor-tip { display: flex; gap: 9px; margin-top: auto; padding: 12px; border-radius: 10px; color: #667069; background: #e8ece7; }
 .editor-tip > span { color: var(--green); }
@@ -550,6 +569,7 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
   .platform-copy-editor, .platform-assets-panel, .platform-fields-scroll { overflow: visible; }
   .platform-fields-scroll { padding: 20px 20px 12px; }
   .generation-row { padding: 13px 20px 16px; }
+  .generation-options { gap: 8px; }
   .platform-assets-panel { border-top: 1px solid var(--line); border-left: 0; }
   .account-card { grid-template-columns: 44px minmax(0,1fr); }
   .account-state { grid-column: 2; justify-self: start; }
@@ -561,14 +581,15 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
   .queue-body { grid-template-columns: 1fr; overflow-y: auto; }
   .queue-composer { border-right: 0; border-bottom: 1px solid var(--line); }
   .queue-tasks { overflow: visible; }
-  .asset-item { grid-template-columns: 42px minmax(0,1fr) 28px 28px; align-items: center; }
-  .asset-item .asset-thumb { grid-column: 1; grid-row: 1; }
-  .asset-item .asset-copy { grid-column: 2; grid-row: 1; }
-  .asset-item:not(.pending-asset) .asset-match-status { grid-column: 3; grid-row: 1; }
-  .asset-item:not(.pending-asset) .remove-asset { grid-column: 4; grid-row: 1; }
-  .asset-item:not(.pending-asset) .asset-match-info { grid-column: 2 / 5; grid-row: 2; padding: 8px 0 0; border-top: 1px solid var(--line); border-left: 0; }
-  .asset-item.pending-asset { grid-template-columns: 42px minmax(0,1fr) 28px; }
-  .asset-item.pending-asset .remove-asset { grid-column: 3; }
+  .asset-item { grid-template-columns: 24px 42px minmax(0,1fr) 28px 28px; align-items: center; }
+  .asset-item .asset-drag-handle { grid-column: 1; grid-row: 1; }
+  .asset-item .asset-thumb { grid-column: 2; grid-row: 1; }
+  .asset-item .asset-copy { grid-column: 3; grid-row: 1; }
+  .asset-item:not(.pending-asset) .asset-match-status { grid-column: 4; grid-row: 1; }
+  .asset-item:not(.pending-asset) .remove-asset { grid-column: 5; grid-row: 1; }
+  .asset-item:not(.pending-asset) .asset-match-info { grid-column: 3 / 6; grid-row: 2; padding: 8px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+  .asset-item.pending-asset { grid-template-columns: 24px 42px minmax(0,1fr) 28px; }
+  .asset-item.pending-asset .remove-asset { grid-column: 4; }
 }
 @media (max-width: 430px) {
   .topbar { align-items: flex-end; }

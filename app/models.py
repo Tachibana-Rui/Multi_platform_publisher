@@ -213,6 +213,7 @@ class PlatformPublication(Base):
     platform_url: Mapped[str | None] = mapped_column(String(2000))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(

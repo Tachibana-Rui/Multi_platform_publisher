@@ -30,7 +30,7 @@ from .content_matcher import (
 )
 from .models import (
     AssetMatch, LibraryFolder, MediaAsset, OriginalAsset, PlatformPublication,
-    PlatformVersion, Post, SourceRoot, Tag,
+    PlatformVersion, Post, SourceRoot, Tag, utc_now,
 )
 from .publish_agent import ACTIVE_STATUSES, publication_agent, serialize_publication
 from .doubao import generate_copy
@@ -45,11 +45,13 @@ from .platform_adapter import (
     validate_platform,
 )
 from .schemas import (
+    AssetOrderUpdate,
     DashboardResponse,
     BatchImportRequest,
     PostCreate,
     PostResponse,
     PostUpdate,
+    PlatformVersionCopyRequest,
     MatchOriginalsRequest,
     ManualMatchRequest,
     GenerateCopyRequest,
@@ -112,6 +114,15 @@ def serialize_post(post: Post) -> dict:
     }
 
 
+def sync_platform_versions_asset_order(post: Post, ordered_asset_ids: list[str]) -> None:
+    for version in post.platform_versions:
+        selected_ids = selected_asset_ids(version)
+        selected_set = set(selected_ids)
+        reordered_ids = [asset_id for asset_id in ordered_asset_ids if asset_id in selected_set]
+        if reordered_ids != selected_ids:
+            version.selected_asset_ids_json = json.dumps(reordered_ids)
+
+
 def get_post_or_404(db: Session, post_id: str) -> Post:
     post = db.get(Post, post_id)
     if not post:
@@ -153,6 +164,17 @@ def login_account(platform: str) -> dict:
     if not account_manager.start(platform, visible=True):
         raise HTTPException(status_code=409, detail="该平台正在检测、登录或发布中")
     return {"accepted": True, "platform": platform}
+
+
+@app.delete("/api/accounts/{platform}", status_code=204)
+def reset_account(platform: str) -> None:
+    if platform not in ACCOUNT_PLATFORMS:
+        raise HTTPException(status_code=422, detail="暂不支持该平台账号")
+    if not account_manager.reset_profile(platform):
+        raise HTTPException(
+            status_code=409,
+            detail="该平台有任务正在执行，请等待完成后再清除登录态",
+        )
 
 
 @app.get("/api/settings/llm")
@@ -640,7 +662,7 @@ def list_existing_platform_versions(
     versions = db.scalars(
         select(PlatformVersion).where(
             PlatformVersion.post_id == post_id,
-            PlatformVersion.platform.in_({"xiaohongshu", "douyin"}),
+            PlatformVersion.platform.in_({"xiaohongshu", "douyin", "bilibili"}),
         ).order_by(PlatformVersion.platform)
     ).all()
     return [serialize_version(version, post) for version in versions]
@@ -675,6 +697,27 @@ def update_platform_version(
     return serialize_version(version, post)
 
 
+@app.post("/api/posts/{post_id}/platform-versions/{platform}/sync-copy")
+def sync_platform_version_copy(
+    post_id: str,
+    platform: str,
+    payload: PlatformVersionCopyRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    validate_platform(platform)
+    if payload.source_platform == platform:
+        raise HTTPException(status_code=422, detail="不能同步当前平台自己的文案")
+    post = get_post_or_404(db, post_id)
+    source = get_or_create_version(db, post, payload.source_platform)
+    target = get_or_create_version(db, post, platform)
+    target.title = source.title
+    target.body = source.body
+    target.content_source = "synced"
+    db.commit()
+    db.refresh(target)
+    return serialize_version(target, post)
+
+
 @app.post("/api/posts/{post_id}/platform-versions/{platform}/generate")
 async def generate_platform_version(
     post_id: str,
@@ -693,9 +736,21 @@ async def generate_platform_version(
     assets = resolve_selected_assets(post, requested_ids)
     validate_platform_assets(platform, assets)
     image_assets = [asset for asset in assets if asset.media_type == "image"][:4]
-    generated = await generate_copy(post, platform, image_assets, payload.custom_prompt)
-    version.title = generated["title"]
-    version.body = generated["body"]
+    if payload.generate_title and payload.generate_body:
+        generated = await generate_copy(post, platform, image_assets, payload.custom_prompt)
+    else:
+        generated = await generate_copy(
+            post,
+            platform,
+            image_assets,
+            payload.custom_prompt,
+            generate_title=payload.generate_title,
+            generate_body=payload.generate_body,
+        )
+    if payload.generate_title:
+        version.title = generated["title"]
+    if payload.generate_body:
+        version.body = generated["body"]
     version.selected_asset_ids_json = json.dumps(requested_ids)
     version.generation_count += 1
     version.content_source = "llm"
@@ -809,6 +864,30 @@ async def upload_assets(
         raise
 
 
+@app.put("/api/posts/{post_id}/assets/order", response_model=PostResponse)
+def reorder_assets(
+    post_id: str,
+    payload: AssetOrderUpdate,
+    db: Session = Depends(get_db),
+) -> dict:
+    post = get_post_or_404(db, post_id)
+    requested_ids = payload.asset_ids
+    if len(set(requested_ids)) != len(requested_ids):
+        raise HTTPException(status_code=422, detail="素材排序中包含重复项")
+    existing_ids = [asset.id for asset in post.assets]
+    if set(requested_ids) != set(existing_ids):
+        raise HTTPException(status_code=422, detail="素材排序必须包含当前内容的全部素材")
+
+    position_by_id = {asset_id: index for index, asset_id in enumerate(requested_ids)}
+    for asset in post.assets:
+        asset.position = position_by_id[asset.id]
+    sync_platform_versions_asset_order(post, requested_ids)
+    post.updated_at = utc_now()
+    db.commit()
+    db.expire(post, ["assets", "platform_versions"])
+    return serialize_post(post)
+
+
 @app.delete("/api/posts/{post_id}/assets/{asset_id}", response_model=PostResponse)
 def delete_asset(post_id: str, asset_id: str, db: Session = Depends(get_db)) -> dict:
     post = get_post_or_404(db, post_id)
@@ -818,6 +897,12 @@ def delete_asset(post_id: str, asset_id: str, db: Session = Depends(get_db)) -> 
     path = settings.upload_dir / asset.storage_name
     match = db.scalar(select(AssetMatch).where(AssetMatch.downloaded_asset_id == asset.id))
     copied_path = settings.upload_dir / match.copied_storage_name if match and match.copied_storage_name else None
+    remaining_assets = [item for item in post.assets if item.id != asset.id]
+    remaining_ids = [item.id for item in remaining_assets]
+    for index, remaining in enumerate(remaining_assets):
+        remaining.position = index
+    sync_platform_versions_asset_order(post, remaining_ids)
+    post.updated_at = utc_now()
     db.delete(asset)
     db.commit()
     path.unlink(missing_ok=True)
@@ -825,6 +910,7 @@ def delete_asset(post_id: str, asset_id: str, db: Session = Depends(get_db)) -> 
         copied_path.unlink(missing_ok=True)
     from .media_storage import prune_empty_media_dirs
     prune_empty_media_dirs(post_id)
+    db.expire(post, ["assets", "platform_versions"])
     db.refresh(post)
     return serialize_post(post)
 
@@ -850,7 +936,7 @@ def list_publications(
 @app.post("/api/publications", status_code=201)
 def create_publication(payload: PublicationCreate, db: Session = Depends(get_db)) -> dict:
     post = get_post_or_404(db, payload.post_id)
-    publication = build_publication(db, post, payload.platform, payload.visibility)
+    publication = build_publication(db, post, payload.platform, payload.visibility, payload.scheduled_at)
     db.add(publication)
     db.commit()
     db.refresh(publication)
@@ -863,6 +949,7 @@ def build_publication(
     post: Post,
     platform: str,
     visibility: str,
+    scheduled_at=None,
 ) -> PlatformPublication:
     if platform not in PUBLISHABLE_PLATFORMS:
         raise HTTPException(status_code=422, detail="该平台已不支持创建发布任务")
@@ -873,7 +960,7 @@ def build_publication(
     active = db.scalar(select(PlatformPublication).where(
         PlatformPublication.post_id == post.id,
         PlatformPublication.platform == platform,
-        PlatformPublication.status.in_(ACTIVE_STATUSES),
+        PlatformPublication.status.in_(ACTIVE_STATUSES | {"scheduled"}),
     ))
     if active:
         raise HTTPException(status_code=409, detail="该内容在此平台已有进行中的发布任务")
@@ -882,13 +969,14 @@ def build_publication(
         platform_version_id=version.id,
         platform=platform,
         visibility=visibility,
+        scheduled_at=scheduled_at,
         title=version.title,
         body=version.body,
         asset_ids_json=json.dumps(asset_ids),
         logs_json=json.dumps([{
             "at": publication_time().isoformat(),
             "status": "pending",
-            "message": "发布任务已创建",
+            "message": "已创建平台原生定时发布任务" if scheduled_at else "发布任务已创建",
         }], ensure_ascii=False),
     )
     return publication
@@ -908,7 +996,9 @@ def create_publications_batch(
     skipped: list[dict] = []
     for platform in payload.platforms:
         try:
-            publication = build_publication(db, post, platform, payload.visibility)
+            publication = build_publication(
+                db, post, platform, payload.visibility, payload.scheduled_at
+            )
             db.add(publication)
             publications.append(publication)
         except HTTPException as exc:
@@ -987,6 +1077,11 @@ def mark_publication_unpublished(
 ) -> dict:
     publication = get_publication_or_404(db, publication_id)
     ensure_publication_record_editable(publication)
+    if publication.status == "scheduled":
+        raise HTTPException(
+            status_code=409,
+            detail="请先在平台创作中心取消原生定时发布，再在这里更新记录",
+        )
     publication.status = "unpublished"
     publication.published_at = None
     publication.platform_item_id = None
@@ -1005,6 +1100,11 @@ def delete_publication_record(
 ) -> None:
     publication = get_publication_or_404(db, publication_id)
     ensure_publication_record_editable(publication)
+    if publication.status == "scheduled":
+        raise HTTPException(
+            status_code=409,
+            detail="请先在平台创作中心取消原生定时发布，再删除此记录",
+        )
     db.delete(publication)
     db.commit()
 

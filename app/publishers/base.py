@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -26,6 +27,7 @@ class PublishSnapshot:
     title: str
     body: str
     assets: list[PublishAsset]
+    scheduled_at: datetime | None = None
 
 
 StatusCallback = Callable[[str, str], None]

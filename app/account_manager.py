@@ -14,6 +14,9 @@ from .publishers.browser import (
 )
 
 
+import shutil
+from pathlib import Path
+
 ACCOUNT_PLATFORMS = ("douyin", "xiaohongshu", "bilibili")
 PLATFORM_NAMES = {"douyin": "抖音", "xiaohongshu": "小红书", "bilibili": "B站"}
 ACCOUNT_URLS = {
@@ -21,6 +24,7 @@ ACCOUNT_URLS = {
     "xiaohongshu": PUBLISH_URLS["xiaohongshu"],
     "bilibili": PUBLISH_URLS["bilibili_video"],
 }
+DOWNLOADER_PROFILES = ("douyin", "xiaohongshu")
 
 
 def _iso_now() -> str:
@@ -51,6 +55,46 @@ class AccountManager:
     def check_all(self) -> None:
         for platform in ACCOUNT_PLATFORMS:
             self.start(platform, visible=False)
+
+    def reset_profile(self, platform: str) -> bool:
+        """清除指定平台的浏览器登录态。
+
+        返回 True 表示成功清除，False 表示该平台有正在运行的任务需稍后再试。
+        """
+        if platform not in ACCOUNT_PLATFORMS:
+            raise ValueError("暂不支持该平台账号")
+        with self._lock:
+            task = self._tasks.get(platform)
+            if task and task.is_alive():
+                return False
+            platform_lock = PLATFORM_BROWSER_LOCKS.get(platform)
+            if platform_lock and platform_lock.locked():
+                return False
+
+        profile_dirs_to_clear: list[Path] = []
+        # 账号管理（发布）使用的 profile
+        account_profile = settings.browser_profile_dir / platform
+        if account_profile.is_dir():
+            profile_dirs_to_clear.append(account_profile)
+        # 批量下载使用的 profile（如果与账号管理目录不同）
+        if platform in DOWNLOADER_PROFILES:
+            downloader_profile = settings.browser_profile_dir / platform
+            if downloader_profile.is_dir() and downloader_profile != account_profile:
+                profile_dirs_to_clear.append(downloader_profile)
+
+        for profile_dir in profile_dirs_to_clear:
+            try:
+                shutil.rmtree(profile_dir)
+            except (OSError, PermissionError):
+                pass
+
+        self._set_state(
+            platform,
+            "not_logged_in",
+            "已清除登录态，点击上方按钮重新登录",
+            checked=True,
+        )
+        return True
 
     def start(self, platform: str, *, visible: bool) -> bool:
         if platform not in ACCOUNT_PLATFORMS:

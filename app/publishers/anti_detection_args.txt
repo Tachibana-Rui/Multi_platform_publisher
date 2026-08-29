@@ -19,4 +19,4 @@
 
 # 忽略证书错误（部分内网/开发环境所需）
 --ignore-certificate-errors
---test-type
+# 注意：--test-type 是典型自动化启动参数，会被风控识别，已移除

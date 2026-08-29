@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 PostStatus = Literal["draft", "ready", "archived"]
@@ -71,6 +71,10 @@ class AssetResponse(BaseModel):
     position: int
     url: str
     created_at: datetime
+
+
+class AssetOrderUpdate(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=300)
 
 
 class PostResponse(BaseModel):
@@ -147,27 +151,56 @@ class PlatformVersionUpdate(BaseModel):
     selected_asset_ids: list[str] = Field(default_factory=list, max_length=30)
 
 
+class PlatformVersionCopyRequest(BaseModel):
+    source_platform: PlatformName
+
+
 class GenerateCopyRequest(BaseModel):
     selected_asset_ids: list[str] = Field(default_factory=list, max_length=30)
     custom_prompt: str | None = Field(default=None, max_length=4000)
+    generate_title: bool = True
+    generate_body: bool = True
+
+    @model_validator(mode="after")
+    def require_generation_target(self) -> "GenerateCopyRequest":
+        if not self.generate_title and not self.generate_body:
+            raise ValueError("请至少选择生成标题或生成正文")
+        return self
 
 
 PublishPlatform = Literal["douyin", "xiaohongshu", "bilibili"]
 PublicationVisibility = Literal["public", "friends", "private"]
 
 
+def _future_schedule(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("预约发布时间必须包含时区")
+    value = value.astimezone(timezone.utc)
+    if value <= datetime.now(timezone.utc):
+        raise ValueError("预约发布时间必须晚于当前时间")
+    return value
+
+
 class PublicationCreate(BaseModel):
     post_id: str
     platform: PublishPlatform
     visibility: PublicationVisibility = "public"
+    scheduled_at: datetime | None = None
+
+    _validate_scheduled_at = field_validator("scheduled_at")(_future_schedule)
 
 
 class PublicationBatchCreate(BaseModel):
     post_id: str
     platforms: list[PublishPlatform] = Field(min_length=1, max_length=4)
     visibility: PublicationVisibility = "public"
+    scheduled_at: datetime | None = None
 
     @field_validator("platforms")
     @classmethod
     def unique_platforms(cls, values: list[PublishPlatform]) -> list[PublishPlatform]:
         return list(dict.fromkeys(values))
+
+    _validate_scheduled_at = field_validator("scheduled_at")(_future_schedule)

@@ -2,6 +2,8 @@ const state = {
   posts: [],
   editingPost: null,
   pendingFiles: [],
+  assetOrder: [],
+  assetOrderDirty: false,
   view: localStorage.getItem("content-hub-view") || "grid",
   scanPollTimer: null,
   adapterPost: null,
@@ -84,6 +86,7 @@ const elements = {
   platformModal: document.querySelector("#platformModal"),
   targetPlatform: document.querySelector("#targetPlatform"),
   publicationVisibility: document.querySelector("#publicationVisibility"),
+  publicationScheduledAt: document.querySelector("#publicationScheduledAt"),
   platformTitle: document.querySelector("#platformTitle"),
   platformBody: document.querySelector("#platformBody"),
   interactiveTokenPanel: document.querySelector("#interactiveTokenPanel"),
@@ -92,7 +95,11 @@ const elements = {
   mentionTokenList: document.querySelector("#mentionTokenList"),
   officialEditNote: document.querySelector("#officialEditNote"),
   generationPrompt: document.querySelector("#generationPrompt"),
+  generateTitle: document.querySelector("#generateTitle"),
+  generateBody: document.querySelector("#generateBody"),
   generateCopy: document.querySelector("#generateCopyButton"),
+  syncPlatformCopy: document.querySelector("#syncPlatformCopyButton"),
+  platformCopySyncMenu: document.querySelector("#platformCopySyncMenu"),
   platformAssets: document.querySelector("#platformAssetsGrid"),
   selectedImageCount: document.querySelector("#selectedImageCount"),
   copySourceBadge: document.querySelector("#copySourceBadge"),
@@ -111,6 +118,7 @@ const elements = {
   publishQueueModal: document.querySelector("#publishQueueModal"),
   queuePostSelect: document.querySelector("#queuePostSelect"),
   queueVisibility: document.querySelector("#queueVisibility"),
+  queueScheduledAt: document.querySelector("#queueScheduledAt"),
   startBatchPublish: document.querySelector("#startBatchPublishButton"),
   queueProgressBar: document.querySelector("#queueProgressBar"),
   queueProgressValue: document.querySelector("#queueProgressValue"),
@@ -133,7 +141,78 @@ const formatDate = (value) => new Intl.DateTimeFormat("zh-CN", {
   month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
 }).format(new Date(value));
 
+const futureDateTimeMin = () => {
+  const date = new Date(Date.now() + 60_000);
+  date.setSeconds(0, 0);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+};
+
+const scheduledAtPayload = (value) => value ? new Date(value).toISOString() : null;
+const scheduleLabel = (value) => value ? `平台定时：${formatDate(value)}` : "立即发布";
+
 const statusLabel = { draft: "草稿", ready: "就绪", archived: "已归档" };
+
+let pendingAssetCounter = 0;
+
+function createPendingAsset(file) {
+  const id = window.crypto?.randomUUID?.() || `${Date.now()}-${pendingAssetCounter++}`;
+  return { id: `pending-${id}`, file };
+}
+
+function assetOrderKey(item) {
+  return `${item.type}:${item.id}`;
+}
+
+function syncAssetOrderWithState() {
+  const storedIds = new Set((state.editingPost?.assets || []).map((asset) => asset.id));
+  const pendingIds = new Set(state.pendingFiles.map((item) => item.id));
+  const knownKeys = new Set();
+  const ordered = state.assetOrder.filter((item) => {
+    const valid = (item.type === "stored" && storedIds.has(item.id))
+      || (item.type === "pending" && pendingIds.has(item.id));
+    if (!valid) return false;
+    knownKeys.add(assetOrderKey(item));
+    return true;
+  });
+  (state.editingPost?.assets || []).forEach((asset) => {
+    const item = { type: "stored", id: asset.id };
+    if (!knownKeys.has(assetOrderKey(item))) ordered.push(item);
+  });
+  state.pendingFiles.forEach((pending) => {
+    const item = { type: "pending", id: pending.id };
+    if (!knownKeys.has(assetOrderKey(item))) ordered.push(item);
+  });
+  state.assetOrder = ordered;
+}
+
+function orderedAssetEntries() {
+  syncAssetOrderWithState();
+  const storedById = new Map((state.editingPost?.assets || []).map((asset) => [asset.id, asset]));
+  const pendingById = new Map(state.pendingFiles.map((pending) => [pending.id, pending]));
+  return state.assetOrder.map((item) => {
+    if (item.type === "stored") {
+      const asset = storedById.get(item.id);
+      return asset ? { ...item, asset } : null;
+    }
+    const pending = pendingById.get(item.id);
+    return pending ? { ...item, pending } : null;
+  }).filter(Boolean);
+}
+
+function orderedStoredAssetIds() {
+  syncAssetOrderWithState();
+  return state.assetOrder.filter((item) => item.type === "stored").map((item) => item.id);
+}
+
+function orderedPendingAssets() {
+  syncAssetOrderWithState();
+  const pendingById = new Map(state.pendingFiles.map((pending) => [pending.id, pending]));
+  return state.assetOrder
+    .filter((item) => item.type === "pending")
+    .map((item) => pendingById.get(item.id))
+    .filter(Boolean);
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -226,6 +305,8 @@ function renderPosts() {
 function openEditor(post = null) {
   state.editingPost = post;
   state.pendingFiles = [];
+  state.assetOrder = (post?.assets || []).map((asset) => ({ type: "stored", id: asset.id }));
+  state.assetOrderDirty = false;
   state.assetMatches = [];
   state.editorPlatformVersions = {};
   elements.form.reset();
@@ -273,6 +354,8 @@ function closeEditor() {
   elements.modal.hidden = true;
   document.body.style.overflow = "";
   state.pendingFiles = [];
+  state.assetOrder = [];
+  state.assetOrderDirty = false;
 }
 
 function openImport() {
@@ -360,14 +443,15 @@ function renderAccounts(accounts) {
   state.accounts = accounts;
   elements.accountGrid.innerHTML = accounts.map((account) => {
     const working = ["checking", "awaiting_login", "busy"].includes(account.status);
-    const action = account.status === "logged_in"
+    const loginButton = account.status === "logged_in"
       ? '<span class="account-ready-mark">✓ 可以发布</span>'
       : `<button class="account-login-button" data-login-platform="${account.platform}" ${working ? "disabled" : ""}>${account.status === "awaiting_login" ? "请在浏览器登录" : "打开登录网页"}</button>`;
+    const resetButton = `<button class="account-reset-button" data-reset-platform="${account.platform}" ${working ? "disabled" : ""}>清除登录态</button>`;
     return `<article class="account-card">
       <span class="account-platform-icon ${account.platform}">${accountIcons[account.platform]}</span>
       <div class="account-copy"><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.message)}</small></div>
       <span class="account-state ${account.status}">${accountStatusLabels[account.status] || account.status}</span>
-      <div class="account-card-action">${action}</div>
+      <div class="account-card-action">${loginButton}${resetButton}</div>
     </article>`;
   }).join("");
 }
@@ -409,6 +493,7 @@ const platformLabels = {
   douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站",
   kuaishou: "快手", wechat_channels: "视频号", wechat_moments: "微信朋友圈",
 };
+const platformCopySourcePlatforms = ["douyin", "xiaohongshu", "bilibili"];
 const platformImageLimits = { douyin: 30, xiaohongshu: 18, bilibili: 9 };
 
 function splitInteractiveTokens(body) {
@@ -484,7 +569,32 @@ function suggestedPrompt() {
     .filter((input) => selected.has(input.value)).length, 4);
   const base = state.platformVersion?.suggested_prompt
     || `生成 cos作品 ${platformLabels[state.adapterPlatform]} 标题和文案，并生成5个相关标签追加在正文末尾。`;
-  return base.replace(/带有\d+张图片/, `带有${count}张图片`);
+  const prompt = base.replace(/带有\d+张图片/, `带有${count}张图片`);
+  if (elements.generateTitle.checked && elements.generateBody.checked) return prompt;
+  if (!elements.generateTitle.checked && !elements.generateBody.checked) {
+    return `${prompt}\n\n请选择至少一项生成内容。`;
+  }
+  const target = elements.generateTitle.checked ? "标题" : "正文";
+  const untouched = elements.generateTitle.checked ? "正文" : "标题";
+  return `${prompt}\n\n本次仅生成${target}；${untouched}必须返回空字符串。`;
+}
+
+function generationButtonText() {
+  if (elements.generateTitle.checked && elements.generateBody.checked) {
+    return state.platformVersion?.generation_count > 0 ? "✦ 再次生成" : "✦ 一键生成";
+  }
+  if (!elements.generateTitle.checked && !elements.generateBody.checked) return "✦ 选择生成内容";
+  const target = elements.generateTitle.checked ? "标题" : "正文";
+  return `✦ 生成${target}`;
+}
+
+function updateGenerationOptions() {
+  const selected = elements.generateTitle.checked || elements.generateBody.checked;
+  elements.generateCopy.disabled = !selected || !state.llmSettings?.has_api_key;
+  elements.generateCopy.textContent = generationButtonText();
+  if (elements.generationPrompt.dataset.autoPrompt === "true") {
+    elements.generationPrompt.value = suggestedPrompt();
+  }
 }
 
 function updateSelectedImageCount() {
@@ -507,7 +617,7 @@ function renderLlmReadiness() {
   elements.llmReadiness.innerHTML = ready
     ? `<span></span><p>${escapeHtml(state.llmSettings.model)} 已就绪 · ${mode}</p>`
     : '<span></span><p>尚未配置豆包 API Key</p>';
-  elements.generateCopy.disabled = !ready;
+  elements.generateCopy.disabled = !ready || (!elements.generateTitle.checked && !elements.generateBody.checked);
 }
 
 function renderPlatformVersion(version) {
@@ -517,7 +627,8 @@ function renderPlatformVersion(version) {
   renderInteractiveTokens();
   elements.copySourceBadge.textContent = version.content_source === "llm"
     ? "LLM 生成" : version.content_source === "manual"
-      ? "人工编辑" : version.content_source === "browser" ? "平台页同步" : "原文复制";
+      ? "人工编辑" : version.content_source === "browser" ? "平台页同步"
+        : version.content_source === "synced" ? "跨平台同步" : "原文复制";
   elements.copySourceBadge.classList.toggle("llm", version.content_source === "llm");
   const selected = new Set(version.selected_asset_ids);
   elements.platformAssets.innerHTML = version.assets.length ? version.assets.map((asset, index) => `
@@ -533,11 +644,15 @@ function renderPlatformVersion(version) {
     enforcePlatformAssetSelection(input);
     state.platformDirty = true;
     updateSelectedImageCount();
-    if (!state.platformVersion.last_prompt) elements.generationPrompt.value = suggestedPrompt();
+    if (elements.generationPrompt.dataset.autoPrompt === "true") elements.generationPrompt.value = suggestedPrompt();
   }));
   updateSelectedImageCount();
-  elements.generationPrompt.value = version.last_prompt || suggestedPrompt();
-  elements.generateCopy.textContent = version.generation_count > 0 ? "✦ 再次生成" : "✦ 一键生成";
+  const isAutoPrompt = !version.last_prompt || version.last_prompt === version.suggested_prompt || version.last_prompt.includes("本次仅生成");
+  elements.generationPrompt.dataset.autoPrompt = String(
+    isAutoPrompt
+  );
+  elements.generationPrompt.value = isAutoPrompt ? suggestedPrompt() : version.last_prompt;
+  elements.generateCopy.textContent = generationButtonText();
   elements.versionMeta.textContent = version.generation_count
     ? `已调用 LLM ${version.generation_count} 次 · ${version.last_model || "模型未知"}`
     : "尚未调用 LLM，标题和正文来自 Content Hub 原稿";
@@ -555,8 +670,8 @@ async function loadPlatformVersion(platform) {
 
 const publicationStatusLabels = {
   pending: "等待启动", validating: "正在校验", queued: "排队中", awaiting_login: "等待登录",
-  preparing: "正在上传和填写", review_pending: "等待最终确认", publishing: "正在发布",
-  submitted: "已提交平台", published: "发布成功", failed: "发布失败", cancelled: "已取消",
+  preparing: "正在上传和填写", review_pending: "等待最终确认", publishing: "正在发布", scheduling: "正在设置定时发布",
+  submitted: "已提交平台", scheduled: "已交由平台定时发布", published: "发布成功", failed: "发布失败", cancelled: "已取消",
   unpublished: "未发布",
 };
 
@@ -617,23 +732,23 @@ function closePlatformManager() {
 function queueActionMarkup(publication) {
   const actions = [];
   if (publication.status === "review_pending") {
-    actions.push('<button data-queue-action="confirm">确认发布</button>');
+    actions.push(`<button data-queue-action="confirm">${publication.scheduled_at ? "确认定时发布" : "确认发布"}</button>`);
   }
   if (["failed", "cancelled", "unpublished"].includes(publication.status)
       && publication.platform !== "wechat_moments") {
     actions.push('<button data-queue-action="retry">重试</button>');
   }
-  if (["pending", "validating", "queued", "awaiting_login", "preparing"].includes(publication.status)) {
+  if (["pending", "validating", "queued", "awaiting_login", "preparing", "scheduling"].includes(publication.status)) {
     actions.push('<button data-queue-action="cancel">取消</button>');
   }
-  if (["submitted", "published", "failed", "cancelled", "unpublished"].includes(publication.status)) {
+  if (["submitted", "scheduled", "published", "failed", "cancelled", "unpublished"].includes(publication.status)) {
     if (publication.status !== "published") {
       actions.push('<button class="mark-published" data-queue-action="mark-published">标记已发布</button>');
     }
-    if (publication.status !== "unpublished") {
+    if (publication.status !== "unpublished" && publication.status !== "scheduled") {
       actions.push('<button data-queue-action="mark-unpublished">标记未发布</button>');
     }
-    actions.push('<button class="delete" data-queue-action="delete">删除记录</button>');
+    if (publication.status !== "scheduled") actions.push('<button class="delete" data-queue-action="delete">删除记录</button>');
   }
   return actions.join("");
 }
@@ -644,7 +759,7 @@ function queueVisiblePublications() {
     return state.queuePublications.filter((item) => focus.has(item.id));
   }
   const active = state.queuePublications.filter((item) =>
-    ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(item.status));
+    ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing", "scheduling"].includes(item.status));
   return active.length ? active : state.queuePublications.slice(0, 12);
 }
 
@@ -657,7 +772,7 @@ function renderPublishQueue() {
   elements.queueProgressValue.textContent = `${progress}%`;
   const progressTrack = elements.queueProgressBar.parentElement;
   progressTrack.setAttribute("aria-valuenow", String(progress));
-  const terminal = items.filter((item) => ["submitted", "published", "failed", "cancelled", "unpublished"].includes(item.status)).length;
+  const terminal = items.filter((item) => ["submitted", "scheduled", "published", "failed", "cancelled", "unpublished"].includes(item.status)).length;
   const reviews = items.filter((item) => item.status === "review_pending").length;
   elements.queueProgressText.textContent = items.length
     ? `${terminal}/${items.length} 个任务已结束${reviews ? ` · ${reviews} 个等待人工确认` : ""}`
@@ -666,7 +781,7 @@ function renderPublishQueue() {
     const latestLog = item.logs?.at(-1);
     return `<article class="queue-item" data-publication-id="${item.id}">
       ${publicationCover(item, "queue-item-cover")}
-      <div class="queue-item-copy"><strong>${escapeHtml(item.post_title || item.title || "未命名内容")} · ${platformLabels[item.platform] || item.platform}</strong><small>${escapeHtml(item.error_message || latestLog?.message || publicationStatusLabels[item.status] || item.status)}</small><div class="queue-item-progress"><span style="width:${item.progress || 0}%"></span></div></div>
+      <div class="queue-item-copy"><strong>${escapeHtml(item.post_title || item.title || "未命名内容")} · ${platformLabels[item.platform] || item.platform}</strong><small>${escapeHtml(item.error_message || latestLog?.message || publicationStatusLabels[item.status] || item.status)}${item.scheduled_at ? ` · ${escapeHtml(scheduleLabel(item.scheduled_at))}` : ""}</small><div class="queue-item-progress"><span style="width:${item.progress || 0}%"></span></div></div>
       <div class="queue-item-side"><span class="publication-status ${item.status}">${publicationStatusLabels[item.status] || item.status}</span><div class="queue-item-actions">${queueActionMarkup(item)}</div></div>
     </article>`;
   }).join("") : '<div class="library-empty">选择本地内容和多个平台，即可创建批量发布任务。</div>';
@@ -677,7 +792,7 @@ async function loadPublishQueue() {
   state.queuePublications = await api("/api/publications");
   renderPublishQueue();
   const items = queueVisiblePublications();
-  if (items.some((item) => ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(item.status))) {
+  if (items.some((item) => ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing", "scheduling"].includes(item.status))) {
     state.queuePollTimer = window.setTimeout(
       () => loadPublishQueue().catch((error) => toast(error.message, true)), 1200,
     );
@@ -693,6 +808,7 @@ async function openPublishQueue() {
     ? publishable.map((post) => `<option value="${post.id}">${escapeHtml(post.title || "未命名内容")} · ${postMediaSummary(post)}</option>`).join("")
     : '<option value="">请先为内容添加素材</option>';
   elements.startBatchPublish.disabled = !publishable.length;
+  elements.queueScheduledAt.min = futureDateTimeMin();
   await loadPublishQueue();
 }
 
@@ -728,9 +844,9 @@ function renderPublication(publication) {
   }
   const visibilityLabels = { public: "公开可见", friends: "仅互关好友可见", private: "仅自己可见" };
   const validationErrors = (publication.validation || []).filter((item) => item.level === "error");
-  const active = ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(publication.status);
+  const active = ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing", "scheduling"].includes(publication.status);
   const action = publication.status === "review_pending"
-    ? '<button class="publication-action confirm" data-publication-action="confirm">确认并发布</button>'
+    ? `<button class="publication-action confirm" data-publication-action="confirm">${publication.scheduled_at ? "确认并提交平台定时发布" : "确认并发布"}</button>`
     : ["failed", "cancelled", "unpublished"].includes(publication.status)
       ? '<button class="publication-action" data-publication-action="retry">重试</button>'
       : active && publication.status !== "publishing"
@@ -738,10 +854,11 @@ function renderPublication(publication) {
   elements.publicationPanel.innerHTML = `
     <div class="publication-heading"><strong>发布 Agent</strong><span class="publication-status ${publication.status}">${publicationStatusLabels[publication.status] || publication.status}</span></div>
     <div class="publication-visibility">可见范围：<strong>${visibilityLabels[publication.visibility] || "公开可见"}</strong></div>
+    <div class="publication-visibility">发布方式：<strong>${escapeHtml(scheduleLabel(publication.scheduled_at))}</strong></div>
     <p>${escapeHtml(publication.error_message || latestLog?.message || "任务状态已更新")}</p>
-    ${publication.status === "review_pending" ? `<div class="review-callout">${publication.platform === "douyin" ? "Agent 已尝试自动关联 #tag；请在抖音页面从下拉列表确认 @用户，并检查未匹配话题、封面、分区和声明。" : "请在官方页面完成 #tag、@用户、封面、分区和声明，再回来确认。"}</div>` : ""}
+    ${publication.status === "review_pending" ? `<div class="review-callout">${publication.scheduled_at ? "Agent 已在官方创作页自动勾选定时发布并填写预约时间；确认后仅提交平台表单，应用不会在预约时间自行发布。" : ""}${publication.platform === "douyin" ? "Agent 已尝试自动关联 #tag；请在抖音页面从下拉列表确认 @用户，并检查未匹配话题、封面、分区和声明。" : "请在官方页面完成 #tag、@用户、封面、分区和声明，再回来确认。"}</div>` : ""}
     ${validationErrors.length ? `<div class="publication-errors">${validationErrors.map((item) => escapeHtml(item.message)).join("<br>")}</div>` : ""}
-    ${publication.platform_url && ["submitted", "published"].includes(publication.status) ? `<a class="publication-link" href="${escapeHtml(publication.platform_url)}" target="_blank" rel="noreferrer">查看平台页面 ↗</a>` : ""}
+    ${publication.platform_url && ["submitted", "scheduled", "published"].includes(publication.status) ? `<a class="publication-link" href="${escapeHtml(publication.platform_url)}" target="_blank" rel="noreferrer">查看平台页面 ↗</a>` : ""}
     <div class="publication-actions">${action}<small>第 ${publication.attempt_count} 次尝试</small></div>`;
 }
 
@@ -751,7 +868,7 @@ async function loadLatestPublication() {
   const items = await api(`/api/publications?post_id=${encodeURIComponent(state.adapterPost.id)}&platform=${encodeURIComponent(state.adapterPlatform)}`);
   const publication = items[0] || null;
   renderPublication(publication);
-  if (publication && ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing"].includes(publication.status)) {
+  if (publication && ["pending", "validating", "queued", "awaiting_login", "preparing", "review_pending", "publishing", "scheduling"].includes(publication.status)) {
     state.publicationPollTimer = window.setTimeout(() => loadLatestPublication().catch((error) => toast(error.message, true)), 1500);
   }
 }
@@ -760,6 +877,7 @@ async function openPlatformAdapter(post, initialPlatform = "douyin") {
   state.adapterPost = post;
   state.adapterPlatform = initialPlatform;
   state.browserSyncedContent = null;
+  elements.publicationScheduledAt.min = futureDateTimeMin();
   elements.publicationVisibility.value = "public";
   elements.platformModal.hidden = false;
   document.body.style.overflow = "hidden";
@@ -868,10 +986,79 @@ async function searchLibrary() {
     </article>`).join("");
 }
 
+function clearAssetDragClasses() {
+  elements.assets.querySelectorAll(".drag-source, .drag-over, .drag-over-after").forEach((item) => {
+    item.classList.remove("drag-source", "drag-over", "drag-over-after");
+  });
+}
+
+function clearAssetDropClasses() {
+  elements.assets.querySelectorAll(".drag-over, .drag-over-after").forEach((item) => {
+    item.classList.remove("drag-over", "drag-over-after");
+  });
+}
+
+function moveAssetOrderItem(sourceKey, targetKey, insertAfter = false) {
+  if (!sourceKey || sourceKey === targetKey) return;
+  syncAssetOrderWithState();
+  const fromIndex = state.assetOrder.findIndex((item) => assetOrderKey(item) === sourceKey);
+  if (fromIndex < 0) return;
+  const [moved] = state.assetOrder.splice(fromIndex, 1);
+  const targetIndex = state.assetOrder.findIndex((item) => assetOrderKey(item) === targetKey);
+  if (targetIndex < 0) {
+    state.assetOrder.splice(fromIndex, 0, moved);
+    return;
+  }
+  state.assetOrder.splice(targetIndex + (insertAfter ? 1 : 0), 0, moved);
+  state.assetOrderDirty = true;
+  renderAssets();
+}
+
+function wireAssetDragSorting() {
+  const items = [...elements.assets.querySelectorAll("[data-asset-key]")];
+  items.forEach((item) => {
+    item.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.dataset.assetKey);
+      item.classList.add("drag-source");
+    });
+    item.addEventListener("dragend", clearAssetDragClasses);
+    item.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const rect = item.getBoundingClientRect();
+      const insertAfter = event.clientY > rect.top + rect.height / 2;
+      clearAssetDropClasses();
+      item.classList.add("drag-over");
+      item.classList.toggle("drag-over-after", insertAfter);
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drag-over", "drag-over-after"));
+    item.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const rect = item.getBoundingClientRect();
+      const insertAfter = event.clientY > rect.top + rect.height / 2;
+      const sourceKey = event.dataTransfer.getData("text/plain");
+      clearAssetDragClasses();
+      moveAssetOrderItem(sourceKey, item.dataset.assetKey, insertAfter);
+    });
+  });
+}
+
 function renderAssets() {
-  const storedAssets = state.editingPost?.assets || [];
+  const entries = orderedAssetEntries();
   const matchesByAsset = new Map(state.assetMatches.map((match) => [match.downloaded_asset_id, match]));
-  const storedMarkup = storedAssets.map((asset) => {
+  const assetMarkup = entries.map((entry) => {
+    if (entry.type === "pending") {
+      const file = entry.pending.file;
+      return `
+        <div class="asset-item pending-asset" draggable="true" data-asset-key="${assetOrderKey(entry)}">
+          <span class="asset-drag-handle" title="拖拽排序" aria-hidden="true">☰</span>
+          <div class="asset-thumb">${file.type.startsWith("image/") ? "◇" : "▶"}</div>
+          <div class="asset-copy"><strong>${escapeHtml(file.name)}</strong><small>${formatBytes(file.size)} · 等待上传</small></div>
+          <button class="remove-asset" data-pending-id="${entry.pending.id}" type="button" title="移除">⌫</button>
+        </div>`;
+    }
+    const asset = entry.asset;
     const match = matchesByAsset.get(asset.id);
     let matchMarkup = `
       <div class="asset-match-info idle">
@@ -912,7 +1099,8 @@ function renderAssets() {
       ? `高清原图 · ${match.original_filename || asset.original_name}`
       : `下载图片 · ${asset.original_name}`;
     return `
-      <div class="asset-item">
+      <div class="asset-item" draggable="true" data-asset-key="${assetOrderKey(entry)}">
+        <span class="asset-drag-handle" title="拖拽排序" aria-hidden="true">☰</span>
         ${asset.media_type === "image"
           ? `<button class="asset-thumb" type="button" data-preview-url="${escapeHtml(previewUrl)}" data-preview-label="${escapeHtml(previewLabel)}" title="点击查看${match?.status === "matched" && match.original_url ? "高清原图" : "下载图片"}"><img src="${asset.url}" alt=""></button>`
           : '<div class="asset-thumb">▶</div>'}
@@ -921,15 +1109,11 @@ function renderAssets() {
         <button class="remove-asset" data-asset-id="${asset.id}" type="button" title="删除素材">⌫</button>
       </div>`;
   }).join("");
-  const pendingMarkup = state.pendingFiles.map((file, index) => `
-    <div class="asset-item pending-asset">
-      <div class="asset-thumb">${file.type.startsWith("image/") ? "◇" : "▶"}</div>
-      <div class="asset-copy"><strong>${escapeHtml(file.name)}</strong><small>${formatBytes(file.size)} · 等待上传</small></div>
-      <button class="remove-asset" data-pending-index="${index}" type="button" title="移除">⌫</button>
-    </div>`).join("");
-  elements.assets.innerHTML = storedMarkup + pendingMarkup;
-  elements.assets.querySelectorAll("[data-pending-index]").forEach((button) => button.addEventListener("click", () => {
-    state.pendingFiles.splice(Number(button.dataset.pendingIndex), 1);
+  elements.assets.innerHTML = assetMarkup;
+  wireAssetDragSorting();
+  elements.assets.querySelectorAll("[data-pending-id]").forEach((button) => button.addEventListener("click", () => {
+    state.pendingFiles = state.pendingFiles.filter((pending) => pending.id !== button.dataset.pendingId);
+    state.assetOrder = state.assetOrder.filter((item) => !(item.type === "pending" && item.id === button.dataset.pendingId));
     renderAssets();
   }));
   elements.assets.querySelectorAll("[data-asset-id]").forEach((button) => button.addEventListener("click", async () => {
@@ -978,16 +1162,54 @@ async function loadMatches(postId) {
 
 function addFiles(fileList) {
   const incoming = [...fileList].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/"));
-  state.pendingFiles.push(...incoming);
+  const pending = incoming.map(createPendingAsset);
+  state.pendingFiles.push(...pending);
+  state.assetOrder.push(...pending.map((item) => ({ type: "pending", id: item.id })));
   renderAssets();
   elements.fileInput.value = "";
 }
 
-async function uploadPending(postId) {
-  if (!state.pendingFiles.length) return null;
+async function uploadPending(postId, pendingItems = orderedPendingAssets()) {
+  if (!pendingItems.length) return null;
   const formData = new FormData();
-  state.pendingFiles.forEach((file) => formData.append("files", file));
+  pendingItems.forEach((pending) => formData.append("files", pending.file));
   return api(`/api/posts/${postId}/assets`, { method: "POST", body: formData });
+}
+
+function replacePendingOrderWithUploadedAssets(post, previousAssetIds, pendingItems) {
+  const createdAssets = post.assets
+    .filter((asset) => !previousAssetIds.has(asset.id))
+    .sort((left, right) => left.position - right.position || new Date(left.created_at) - new Date(right.created_at));
+  const replacements = new Map();
+  pendingItems.forEach((pending, index) => {
+    if (createdAssets[index]) replacements.set(pending.id, createdAssets[index].id);
+  });
+  state.assetOrder = state.assetOrder
+    .map((item) => (item.type === "pending" && replacements.has(item.id)
+      ? { type: "stored", id: replacements.get(item.id) }
+      : item))
+    .filter((item) => item.type !== "pending" || !replacements.has(item.id));
+}
+
+async function persistAssetOrder(post) {
+  if (!post.assets.length) return post;
+  syncAssetOrderWithState();
+  const assetIds = orderedStoredAssetIds();
+  if (assetIds.length !== post.assets.length) {
+    state.assetOrder = post.assets.map((asset) => ({ type: "stored", id: asset.id }));
+    state.assetOrderDirty = false;
+    return post;
+  }
+  const alreadyInOrder = post.assets.every((asset, index) => asset.id === assetIds[index]);
+  if (!state.assetOrderDirty && alreadyInOrder) return post;
+  const orderedPost = await api(`/api/posts/${post.id}/assets/order`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ asset_ids: assetIds }),
+  });
+  state.assetOrderDirty = false;
+  state.assetOrder = orderedPost.assets.map((asset) => ({ type: "stored", id: asset.id }));
+  return orderedPost;
 }
 
 async function saveEditorContent({ closeAfter = true, showToast = true } = {}) {
@@ -1001,15 +1223,23 @@ async function saveEditorContent({ closeAfter = true, showToast = true } = {}) {
     content_type: state.editingPost?.content_type || "gallery",
   };
   const wasEditing = Boolean(state.editingPost);
+  const previousAssetIds = new Set((state.editingPost?.assets || []).map((asset) => asset.id));
+  const pendingItems = orderedPendingAssets();
   elements.save.disabled = true;
   elements.save.textContent = state.pendingFiles.length ? "正在保存与上传…" : "正在保存…";
   try {
     let post = state.editingPost
       ? await api(`/api/posts/${state.editingPost.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
       : await api("/api/posts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    post = await uploadPending(post.id) || post;
+    const uploadedPost = await uploadPending(post.id, pendingItems);
+    if (uploadedPost) {
+      replacePendingOrderWithUploadedAssets(uploadedPost, previousAssetIds, pendingItems);
+      post = uploadedPost;
+    }
     state.editingPost = post;
     state.pendingFiles = [];
+    post = await persistAssetOrder(post);
+    state.editingPost = post;
     if (closeAfter) closeEditor();
     await Promise.all([loadPosts(), loadDashboard()]);
     if (showToast) toast(wasEditing ? "内容已更新" : "内容已创建");
@@ -1182,12 +1412,51 @@ elements.targetPlatform.addEventListener("change", async () => {
 });
 
 [elements.platformTitle, elements.platformBody, elements.generationPrompt].forEach((input) => {
-  input.addEventListener("input", () => { state.platformDirty = true; });
+  input.addEventListener("input", () => {
+    state.platformDirty = true;
+    if (input === elements.generationPrompt) input.dataset.autoPrompt = "false";
+  });
 });
 elements.platformBody.addEventListener("input", renderInteractiveTokens);
+[elements.generateTitle, elements.generateBody].forEach((input) => input.addEventListener("change", updateGenerationOptions));
+
+elements.syncPlatformCopy.addEventListener("click", async () => {
+  if (!state.adapterPost || !state.adapterPlatform) return;
+  elements.syncPlatformCopy.disabled = true;
+  try {
+    const sources = platformCopySourcePlatforms.filter((platform) => platform !== state.adapterPlatform);
+    elements.platformCopySyncMenu.innerHTML = `<strong>选择要覆盖到${escapeHtml(platformLabels[state.adapterPlatform])}的来源</strong>${sources.map((version) => (
+      `<button type="button" data-copy-source-platform="${escapeHtml(version)}">同步${escapeHtml(platformLabels[version])}文案</button>`
+    )).join("")}`;
+    elements.platformCopySyncMenu.hidden = false;
+  } catch (error) { toast(error.message, true); }
+  finally { elements.syncPlatformCopy.disabled = false; }
+});
+
+elements.platformCopySyncMenu.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy-source-platform]");
+  if (!button || !state.adapterPost) return;
+  const source = button.dataset.copySourcePlatform;
+  if (!confirm(`用${platformLabels[source]}的标题和正文覆盖当前${platformLabels[state.adapterPlatform]}文案？当前平台素材不会改变。`)) return;
+  button.disabled = true;
+  try {
+    const version = await api(`/api/posts/${state.adapterPost.id}/platform-versions/${state.adapterPlatform}/sync-copy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_platform: source }),
+    });
+    elements.platformCopySyncMenu.hidden = true;
+    renderPlatformVersion(version);
+    toast(`已同步${platformLabels[source]}文案`);
+  } catch (error) { toast(error.message, true); button.disabled = false; }
+});
 
 elements.generateCopy.addEventListener("click", async () => {
   if (!state.adapterPost || !state.llmSettings?.has_api_key) return;
+  if (!elements.generateTitle.checked && !elements.generateBody.checked) {
+    toast("请至少选择生成标题或生成正文", true);
+    return;
+  }
   elements.generateCopy.disabled = true;
   elements.generateCopy.textContent = "✦ 豆包生成中…";
   try {
@@ -1197,14 +1466,15 @@ elements.generateCopy.addEventListener("click", async () => {
       body: JSON.stringify({
         selected_asset_ids: selectedPlatformAssetIds(),
         custom_prompt: elements.generationPrompt.value.trim() || null,
+        generate_title: elements.generateTitle.checked,
+        generate_body: elements.generateBody.checked,
       }),
     });
     renderPlatformVersion(version);
-    toast("已生成新的平台标题和正文");
+    toast(elements.generateTitle.checked && elements.generateBody.checked ? "已生成新的平台标题和正文" : `已生成新的平台${elements.generateTitle.checked ? "标题" : "正文"}`);
   } catch (error) { toast(error.message, true); }
   finally {
-    elements.generateCopy.disabled = !state.llmSettings?.has_api_key;
-    elements.generateCopy.textContent = state.platformVersion?.generation_count > 0 ? "✦ 再次生成" : "✦ 一键生成";
+    updateGenerationOptions();
   }
 });
 
@@ -1226,6 +1496,7 @@ elements.preparePublish.addEventListener("click", async () => {
         post_id: state.adapterPost.id,
         platform: state.adapterPlatform,
         visibility: elements.publicationVisibility.value,
+        scheduled_at: scheduledAtPayload(elements.publicationScheduledAt.value),
       }),
     });
     renderPublication(publication);
@@ -1240,11 +1511,13 @@ elements.publicationPanel.addEventListener("click", async (event) => {
   if (!button || !state.publication) return;
   const action = button.dataset.publicationAction;
   const visibilityLabels = { public: "公开可见", friends: "仅互关好友可见", private: "仅自己可见" };
-  if (action === "confirm" && !confirm(`确认将当前内容发布到${platformLabels[state.adapterPlatform]}，可见范围为“${visibilityLabels[state.publication.visibility]}”？`)) return;
+  if (action === "confirm" && !confirm(
+    `${state.publication.scheduled_at ? "确认在平台原生定时发布" : "确认将当前内容发布"}到${platformLabels[state.adapterPlatform]}，可见范围为“${visibilityLabels[state.publication.visibility]}”？${state.publication.scheduled_at ? `\n预约时间：${formatDate(state.publication.scheduled_at)}\n应用不会在预约时间自行提交。` : ""}`,
+  )) return;
   button.disabled = true;
   try {
     await api(`/api/publications/${state.publication.id}/${action}`, { method: "POST" });
-    toast(action === "confirm" ? "已确认，Agent 正在提交作品" : action === "retry" ? "已重新打开平台窗口" : "正在取消任务");
+    toast(action === "confirm" ? (state.publication.scheduled_at ? "已确认，Agent 正在提交平台定时发布" : "已确认，Agent 正在提交作品") : action === "retry" ? "已重新打开平台窗口" : "正在取消任务");
     await loadLatestPublication();
   } catch (error) { toast(error.message, true); button.disabled = false; }
 });
@@ -1324,11 +1597,12 @@ elements.startBatchPublish.addEventListener("click", async () => {
         post_id: elements.queuePostSelect.value,
         platforms,
         visibility: elements.queueVisibility.value,
+        scheduled_at: scheduledAtPayload(elements.queueScheduledAt.value),
       }),
     });
     state.queueFocusIds = result.created.map((item) => item.id);
     if (result.created.length) {
-      toast(`已创建 ${result.created.length} 个平台发布任务${result.skipped.length ? `，跳过 ${result.skipped.length} 个进行中任务` : ""}`);
+      toast(`已创建 ${result.created.length} 个${elements.queueScheduledAt.value ? "平台定时发布" : "平台发布"}任务${result.skipped.length ? `，跳过 ${result.skipped.length} 个进行中任务` : ""}`);
     } else {
       toast("所选平台已有进行中的发布任务", true);
     }
@@ -1427,14 +1701,26 @@ document.querySelector("#doneAccountButton").addEventListener("click", closeAcco
 elements.refreshAccounts.addEventListener("click", () => checkAccounts().catch((error) => toast(error.message, true)));
 elements.accountModal.addEventListener("click", (event) => { if (event.target === elements.accountModal) closeAccountManager(); });
 elements.accountGrid.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-login-platform]");
-  if (!button) return;
-  button.disabled = true;
-  try {
-    await api(`/api/accounts/${button.dataset.loginPlatform}/login`, { method: "POST" });
-    toast(`已打开${platformLabels[button.dataset.loginPlatform]}登录网页`);
-    await loadAccounts();
-  } catch (error) { toast(error.message, true); button.disabled = false; }
+  const loginButton = event.target.closest("[data-login-platform]");
+  if (loginButton) {
+    loginButton.disabled = true;
+    try {
+      await api(`/api/accounts/${loginButton.dataset.loginPlatform}/login`, { method: "POST" });
+      toast(`已打开${platformLabels[loginButton.dataset.loginPlatform]}登录网页`);
+      await loadAccounts();
+    } catch (error) { toast(error.message, true); loginButton.disabled = false; }
+    return;
+  }
+  const resetButton = event.target.closest("[data-reset-platform]");
+  if (resetButton) {
+    const platform = resetButton.dataset.resetPlatform;
+    resetButton.disabled = true;
+    try {
+      await api(`/api/accounts/${platform}`, { method: "DELETE" });
+      toast(`已清除${platformLabels[platform]}的浏览器登录态`);
+      await loadAccounts();
+    } catch (error) { toast(error.message, true); resetButton.disabled = false; }
+  }
 });
 document.querySelector("#aiConfigButton").addEventListener("click", () => openAiConfig().catch((error) => toast(error.message, true)));
 document.querySelector("#closeAiConfigButton").addEventListener("click", closeAiConfig);

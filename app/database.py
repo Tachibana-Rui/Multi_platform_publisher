@@ -43,6 +43,12 @@ def init_db() -> None:
                 "ALTER TABLE platform_publications "
                 "ADD COLUMN visibility VARCHAR(20) NOT NULL DEFAULT 'public'"
             ))
+    if "scheduled_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE platform_publications "
+                "ADD COLUMN scheduled_at DATETIME"
+            ))
 
 
 def get_db() -> Generator[Session, None, None]:
