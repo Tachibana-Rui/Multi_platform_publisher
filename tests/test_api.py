@@ -24,7 +24,7 @@ from app.main import app  # noqa: E402
 from app.database import engine  # noqa: E402
 from app.content_matcher import parse_structured_folder  # noqa: E402
 from app.xiaohongshu import normalize_source_url, parse_note_page  # noqa: E402
-from app.douyin_importer import ParsedDouyinPost, normalize_douyin_url  # noqa: E402
+from app.douyin_importer import DouyinPost, normalize_douyin_url  # noqa: E402
 from app.xiaohongshu import ParsedNote  # noqa: E402
 
 atexit.register(engine.dispose)
@@ -656,7 +656,7 @@ def test_batch_douyin_import_keeps_success_when_another_link_fails(monkeypatch):
         if url.endswith("2"):
             from fastapi import HTTPException
             raise HTTPException(status_code=422, detail="模拟无法解析")
-        return url, ParsedDouyinPost("1", "抖音作品", "抖音正文", ["抖音"]), _fake_import_asset(post_id)
+        return url, DouyinPost("1", "抖音作品", "抖音正文", "作者", ["抖音"]), _fake_import_asset(post_id)
 
     monkeypatch.setattr("app.main.import_public_douyin", fake_import)
     assert normalize_douyin_url("复制 https://v.douyin.com/example/ 看看") == "https://v.douyin.com/example/"

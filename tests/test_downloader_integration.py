@@ -352,10 +352,9 @@ class TestDatabaseIsolation:
 
     def test_uses_isolated_database_path(self, isolated_data_dir):
         """测试使用独立的数据库文件，与主数据库隔离。"""
-        # 重新加载配置以获取测试路径的配置
-        import importlib
+        # Read the temporary environment without replacing the shared settings
+        # object already held by the API and media modules.
         from app import config
-        importlib.reload(config)
 
         test_settings = config.get_settings()
         # 验证：测试配置的数据库 URL 包含 "test.db"

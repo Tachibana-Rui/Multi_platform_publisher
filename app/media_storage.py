@@ -38,7 +38,7 @@ def prune_empty_media_dirs(post_id: str) -> None:
     post_root = (settings.upload_dir / post_id).resolve()
     if not post_root.is_relative_to(settings.upload_dir.resolve()):
         return
-    for name in ("originals", "downloads"):
+    for name in ("originals", "downloads", "processed"):
         folder = post_root / name
         try:
             if folder.is_dir() and not any(folder.iterdir()):
@@ -128,7 +128,7 @@ def migrate_media_layout() -> dict:
         for asset in assets:
             post = asset.post
             normalized = asset.storage_name.replace("\\", "/")
-            if "/originals/" in normalized or "/downloads/" in normalized:
+            if any(f"/{folder}/" in normalized for folder in ("originals", "downloads", "processed")):
                 continue
             if post.source_platform in DOWNLOADED_PLATFORMS:
                 basename = Path(asset.storage_name).name or asset.original_name

@@ -151,6 +151,10 @@ class PlatformVersionUpdate(BaseModel):
     selected_asset_ids: list[str] = Field(default_factory=list, max_length=30)
 
 
+class LandscapeSplitRequest(PlatformVersionUpdate):
+    split_asset_ids: list[str] = Field(min_length=1, max_length=30)
+
+
 class PlatformVersionCopyRequest(BaseModel):
     source_platform: PlatformName
 

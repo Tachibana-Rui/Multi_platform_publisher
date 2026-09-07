@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .assets import save_upload
+from .image_splitter import split_platform_landscapes
 from .account_manager import ACCOUNT_PLATFORMS, account_manager
 from .config import ROOT_DIR, settings
 from .database import SessionLocal, get_db, init_db
@@ -56,6 +57,7 @@ from .schemas import (
     ManualMatchRequest,
     GenerateCopyRequest,
     LLMSettingsUpdate,
+    LandscapeSplitRequest,
     PublicationBatchCreate,
     PublicationCreate,
     PlatformVersionUpdate,
@@ -716,6 +718,20 @@ def sync_platform_version_copy(
     db.commit()
     db.refresh(target)
     return serialize_version(target, post)
+
+
+@app.post("/api/posts/{post_id}/platform-versions/{platform}/split-landscapes")
+def split_landscapes(
+    post_id: str, platform: str, payload: LandscapeSplitRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    post = get_post_or_404(db, post_id)
+    version = get_or_create_version(db, post, platform)
+    split_platform_landscapes(
+        db, post, version, asset_ids=payload.selected_asset_ids,
+        split_asset_ids=payload.split_asset_ids, title=payload.title, body=payload.body,
+    )
+    return serialize_version(version, post)
 
 
 @app.post("/api/posts/{post_id}/platform-versions/{platform}/generate")

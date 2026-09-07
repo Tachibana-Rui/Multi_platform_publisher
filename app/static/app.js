@@ -11,6 +11,7 @@ const state = {
   adapterPlatform: "douyin",
   llmSettings: null,
   platformDirty: false,
+  splittingLandscapes: false,
   publication: null,
   publicationPollTimer: null,
   accounts: [],
@@ -94,6 +95,9 @@ const elements = {
   hashtagTokenList: document.querySelector("#hashtagTokenList"),
   mentionTokenList: document.querySelector("#mentionTokenList"),
   officialEditNote: document.querySelector("#officialEditNote"),
+  splitLandscape: document.querySelector("#splitLandscapeButton"),
+  uploadOrderPreview: document.querySelector("#uploadOrderPreview"),
+  uploadOrderStrip: document.querySelector("#uploadOrderStrip"),
   generationPrompt: document.querySelector("#generationPrompt"),
   generateTitle: document.querySelector("#generateTitle"),
   generateBody: document.querySelector("#generateBody"),
@@ -543,6 +547,13 @@ function selectedPlatformAssetInputs() {
   return [...elements.platformAssets.querySelectorAll("input:checked")];
 }
 
+function selectedLandscapeAssetIds() {
+  const selected = new Set(selectedPlatformAssetIds());
+  return (state.platformVersion?.assets || [])
+    .filter((asset) => selected.has(asset.id) && asset.media_type === "image" && asset.width > asset.height)
+    .map((asset) => asset.id);
+}
+
 function enforcePlatformAssetSelection(changedInput) {
   if (!changedInput.checked) return;
   const inputs = [...elements.platformAssets.querySelectorAll("input")];
@@ -604,9 +615,25 @@ function updateSelectedImageCount() {
   elements.selectedImageCount.textContent = videos
     ? "已选择 1 个视频"
     : images ? `已选择 ${images} 张图片` : "已选择 0 个素材";
+  let position = 0;
   elements.platformAssets.querySelectorAll(".selectable-asset").forEach((label) => {
-    label.classList.toggle("selected", label.querySelector("input").checked);
+    const checked = label.querySelector("input").checked;
+    label.classList.toggle("selected", checked);
+    const badge = label.querySelector(".asset-selection-index");
+    badge.hidden = !checked;
+    badge.textContent = checked ? ++position : "";
   });
+  elements.splitLandscape.disabled = state.splittingLandscapes || !selectedLandscapeAssetIds().length;
+  const assets = new Map((state.platformVersion?.assets || []).map((asset) => [asset.id, asset]));
+  const preview = selected.map((input) => assets.get(input.value)).filter((asset) => asset?.media_type === "image");
+  elements.uploadOrderPreview.hidden = !preview.length;
+  elements.uploadOrderStrip.innerHTML = preview.map((asset, index) => `
+    <figure class="upload-order-card">
+      <button type="button" data-preview-asset="${asset.id}" aria-label="预览第 ${index + 1} 张：${escapeHtml(asset.original_name)}">
+        <img src="${asset.url}" alt="${escapeHtml(asset.original_name)}" loading="lazy">
+      </button>
+      <figcaption title="${escapeHtml(asset.original_name)}">${index + 1} · ${escapeHtml(asset.original_name)}</figcaption>
+    </figure>`).join("");
 }
 
 function renderLlmReadiness() {
@@ -631,9 +658,14 @@ function renderPlatformVersion(version) {
         : version.content_source === "synced" ? "跨平台同步" : "原文复制";
   elements.copySourceBadge.classList.toggle("llm", version.content_source === "llm");
   const selected = new Set(version.selected_asset_ids);
-  elements.platformAssets.innerHTML = version.assets.length ? version.assets.map((asset, index) => `
+  const assetsById = new Map(version.assets.map((asset) => [asset.id, asset]));
+  const orderedAssets = [
+    ...version.selected_asset_ids.map((id) => assetsById.get(id)).filter(Boolean),
+    ...version.assets.filter((asset) => !selected.has(asset.id)),
+  ];
+  elements.platformAssets.innerHTML = orderedAssets.length ? orderedAssets.map((asset, index) => `
     <label class="selectable-asset ${selected.has(asset.id) ? "selected" : ""}">
-      <input type="checkbox" data-media="${asset.media_type}" value="${asset.id}" ${selected.has(asset.id) ? "checked" : ""}>
+      <input type="checkbox" aria-label="选择 ${escapeHtml(asset.original_name)}" data-media="${asset.media_type}" value="${asset.id}" ${selected.has(asset.id) ? "checked" : ""}>
       ${asset.media_type === "image"
         ? `<img src="${asset.url}" alt="${escapeHtml(asset.original_name)}" loading="lazy">`
         : `<video src="${asset.url}#t=0.1" preload="metadata" muted></video><span class="video-asset-badge">▶ 视频</span>`}
@@ -829,7 +861,7 @@ function renderPublication(publication) {
   }
   const latestLog = publication.logs?.at(-1);
   const hasBrowserSync = publication.logs?.some((item) => item.status === "content_synced");
-  if (hasBrowserSync && state.platformVersion && !state.platformDirty) {
+  if (hasBrowserSync && state.platformVersion && !state.platformDirty && !state.splittingLandscapes) {
     const syncKey = `${publication.id}:${publication.title}:${publication.body}`;
     if (elements.platformTitle.value !== publication.title || elements.platformBody.value !== publication.body) {
       elements.platformTitle.value = publication.title;
@@ -894,8 +926,51 @@ function closePlatformAdapter() {
 }
 
 function attemptClosePlatform() {
+  if (state.splittingLandscapes) return;
   if (state.platformDirty && !confirm("平台草稿有尚未保存的修改，确定关闭？")) return;
   closePlatformAdapter();
+}
+
+async function splitSelectedLandscapes() {
+  if (!state.adapterPost || state.splittingLandscapes) return;
+  const splitIds = selectedLandscapeAssetIds();
+  if (!splitIds.length) return;
+  const postId = state.adapterPost.id;
+  const platform = state.adapterPlatform;
+  const prompt = elements.generationPrompt.value;
+  const autoPrompt = elements.generationPrompt.dataset.autoPrompt;
+  state.splittingLandscapes = true;
+  elements.platformModal.querySelector(".platform-modal").inert = true;
+  elements.splitLandscape.disabled = true;
+  elements.splitLandscape.textContent = "正在切分横图…";
+  try {
+    const version = await api(`/api/posts/${postId}/platform-versions/${platform}/split-landscapes`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: elements.platformTitle.value, body: elements.platformBody.value,
+        selected_asset_ids: selectedPlatformAssetIds(), split_asset_ids: splitIds,
+      }),
+    });
+    renderPlatformVersion(version);
+    if (autoPrompt === "false") {
+      elements.generationPrompt.value = prompt;
+      elements.generationPrompt.dataset.autoPrompt = autoPrompt;
+    }
+    const post = await api(`/api/posts/${postId}`);
+    state.adapterPost = post;
+    if (state.editingPost?.id === postId) {
+      state.editingPost = post;
+      renderAssets();
+    }
+    await loadPosts();
+    toast("已保存切图，上传顺序：左半图 → 右半图 → 横向原图");
+  } catch (error) { toast(error.message, true); }
+  finally {
+    state.splittingLandscapes = false;
+    elements.platformModal.querySelector(".platform-modal").inert = false;
+    elements.splitLandscape.textContent = "横图切成两张竖图";
+    updateSelectedImageCount();
+  }
 }
 
 async function savePlatformDraft(showToast = true) {
@@ -1409,6 +1484,13 @@ elements.targetPlatform.addEventListener("change", async () => {
     await loadPlatformVersion(nextPlatform);
   } catch (error) { toast(error.message, true); }
   finally { elements.targetPlatform.disabled = false; }
+});
+
+elements.splitLandscape.addEventListener("click", splitSelectedLandscapes);
+elements.uploadOrderStrip.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-preview-asset]");
+  const asset = state.platformVersion?.assets.find((item) => item.id === button?.dataset.previewAsset);
+  if (asset) openImageViewer(asset.url, asset.original_name);
 });
 
 [elements.platformTitle, elements.platformBody, elements.generationPrompt].forEach((input) => {

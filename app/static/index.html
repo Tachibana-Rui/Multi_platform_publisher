@@ -350,6 +350,14 @@
         </section>
         <aside class="platform-assets-panel">
           <div class="platform-assets-heading"><div><strong>选择发布素材</strong><small id="selectedImageCount">已选择 0 个</small></div><span>视频单选，图片可多选</span></div>
+          <div class="landscape-split-actions">
+            <button class="secondary-button" id="splitLandscapeButton" type="button" disabled>横图切成两张竖图</button>
+            <small>勾选横图后点击：左半图 → 右半图 → 横向原图。超宽图会补白为竖图。</small>
+          </div>
+          <div class="upload-order-preview" id="uploadOrderPreview" hidden>
+            <small>左右滑动预览 · 按编号上传</small>
+            <div class="upload-order-strip" id="uploadOrderStrip" tabindex="0" aria-label="图片上传顺序预览"></div>
+          </div>
           <div class="platform-assets-grid" id="platformAssetsGrid"></div>
           <section class="publication-panel" id="publicationPanel">
             <div class="publication-empty">保存草稿后，可由发布 Agent 打开平台创作中心并自动填写。</div>

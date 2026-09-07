@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 
 from fastapi import HTTPException, UploadFile
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import settings
 from .media_storage import original_storage_name
@@ -71,7 +71,8 @@ def inspect_media(path: Path, media_type: str) -> tuple[int | None, int | None, 
             with Image.open(path) as image:
                 image.verify()
             with Image.open(path) as image:
-                return image.width, image.height, None
+                oriented = ImageOps.exif_transpose(image)
+                return oriented.width, oriented.height, None
         except (UnidentifiedImageError, OSError):
             path.unlink(missing_ok=True)
             raise HTTPException(status_code=422, detail="图片文件无法识别或已经损坏")

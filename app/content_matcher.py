@@ -346,7 +346,7 @@ def match_post_images(
                     original_ratio = original.width / original.height
                     if abs(original_ratio - query_ratio) / query_ratio > 0.015:
                         continue
-                    distance = query_hash - imagehash.hex_to_hash(original.phash)
+                    distance = int(query_hash - imagehash.hex_to_hash(original.phash))
                     if distance <= 12:
                         ranked.append((distance, original))
                 ranked.sort(key=lambda item: item[0])

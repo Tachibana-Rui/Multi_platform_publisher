@@ -382,6 +382,9 @@ def test_topic_cursor_must_be_verified_at_editor_end_before_the_next_tag():
             self.calls += 1
             return self.at_end
 
+        def press(self, _key):
+            pass
+
     assert publisher._place_topic_cursor_at_end(object(), Editor(True), None)
     assert not publisher._place_topic_cursor_at_end(object(), Editor(False), None)
 

@@ -523,14 +523,14 @@ class TopicCandidateMixin:
             if not self._place_topic_cursor_at_end(page, editor, cancel_event):
                 self._unresolved_hashtags.extend(hashtags[index:])
                 break
-            if index:
-                self._insert_topic_text(page, editor, " ")
             # Do not type a tag character by character.  On Douyin, typing the
             # prefix of #cosplay reaches #cos first; the editor then selects #cos
             # and places the caret inside it before the remaining letters arrive.
             # One atomic insert makes the suggestion engine see only the complete
             # intended tag.
-            self._insert_topic_text(page, editor, f"#{hashtag}")
+            # The separator must share the same input event: even a standalone
+            # space can make a controlled editor restore its previous selection.
+            self._insert_topic_text(page, editor, f"{' ' if index else ''}#{hashtag}")
             self._wait_for_topic_menu(page, cancel_event)
             match = self._select_topic_candidate(page, hashtag)
             if match:
@@ -555,28 +555,56 @@ class TopicCandidateMixin:
         self._record_human_action(page, cancel_event)
 
     def _place_topic_cursor_at_end(self, page, editor, cancel_event) -> bool:
-        """Focus an editor and verify that its caret is at its real end position."""
+        """Move both the DOM caret and the editor's selection model to the end."""
         try:
-            self._check_runtime_pause(page, cancel_event)
-            return bool(editor.evaluate("""element => {
-                element.focus();
-                if (typeof element.selectionStart === 'number' && 'value' in element) {
-                    const end = element.value.length;
-                    element.setSelectionRange(end, end);
-                    return element.selectionStart === end && element.selectionEnd === end;
-                }
-                const selection = window.getSelection();
-                if (!selection) return false;
-                const range = document.createRange();
-                range.selectNodeContents(element);
-                range.collapse(false);
-                selection.removeAllRanges();
-                selection.addRange(range);
-                return selection.rangeCount === 1
-                    && selection.isCollapsed
-                    && selection.anchorNode === range.startContainer
-                    && selection.anchorOffset === range.startOffset;
-            }"""))
+            for _attempt in range(3):
+                self._check_runtime_pause(page, cancel_event)
+                editor.evaluate("""element => {
+                    element.focus();
+                    if (typeof element.selectionStart === 'number' && 'value' in element) {
+                        const end = element.value.length;
+                        element.setSelectionRange(end, end);
+                        return;
+                    }
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    const range = document.createRange();
+                    range.selectNodeContents(element);
+                    range.collapse(false);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }""")
+                # Native navigation also updates controlled editors (e.g. Slate /
+                # Draft). Setting a DOM Range alone is undone on the next input.
+                editor.press("Control+End")
+                if editor.evaluate("""async element => {
+                    const atEnd = () => {
+                        if (document.activeElement !== element) return false;
+                        if (typeof element.selectionStart === 'number' && 'value' in element) {
+                            return element.selectionStart === element.value.length
+                                && element.selectionEnd === element.value.length;
+                        }
+                        const selection = window.getSelection();
+                        if (!selection || !selection.rangeCount || !selection.isCollapsed
+                            || !element.contains(selection.anchorNode)) return false;
+                        const anchor = selection.anchorNode.nodeType === Node.ELEMENT_NODE
+                            ? selection.anchorNode : selection.anchorNode.parentElement;
+                        if (anchor.closest('[contenteditable="false"]')) return false;
+                        const tail = document.createRange();
+                        tail.selectNodeContents(element);
+                        tail.setStart(selection.anchorNode, selection.anchorOffset);
+                        // Ignore caret sentinels and visually collapsed trailing space.
+                        return !tail.toString().replace(/[\\s\\u200b\\ufeff]/g, '').length;
+                    };
+                    // Check after selectionchange and the framework's queued render,
+                    // rather than comparing a Range with itself immediately after set.
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    if (!atEnd()) return false;
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    return atEnd();
+                }"""):
+                    return True
+            return False
         except RuntimeError:
             raise
         except Exception:
@@ -719,6 +747,8 @@ class TopicCandidateMixin:
             for index in range(min(candidates.count(), 20)):
                 candidate = candidates.nth(index)
                 if not candidate.is_visible():
+                    continue
+                if candidate.evaluate("element => Boolean(element.closest('[contenteditable], textarea, input'))"):
                     continue
                 if self._normalize_topic_name(candidate.inner_text(timeout=500)) == target:
                     result.append((candidate, target))
@@ -1200,7 +1230,7 @@ class BrowserPublisher(TopicCandidateMixin, ABC):
         if self._unresolved_hashtags:
             topic_hints.append("未找到可靠候选：" + " ".join(f"#{tag}" for tag in self._unresolved_hashtags))
         elif hashtags and not self._bound_hashtags and not self._fuzzy_bound_hashtags:
-            topic_hints.append("请在官方页面确认 #tag 候选")
+            topic_hints.append("请在官方页面输入话题并点击下拉候选：" + " ".join(f"#{tag}" for tag in hashtags))
         if mentions:
             topic_hints.append("请在官方页面确认 @用户候选：" + " ".join(f"@{name}" for name in mentions))
         token_hint = f"；{'；'.join(topic_hints)}" if topic_hints else ""
@@ -1950,11 +1980,13 @@ class DouyinPublisher(BrowserPublisher):
         try:
             cancel_event = getattr(self, "_active_cancel_event", None)
             self._check_runtime_pause(page, cancel_event)
-            editor.click(timeout=3000)
-            editor.press("Control+End")
+            if not self._place_topic_cursor_at_end(page, editor, cancel_event):
+                return
             editor.press("Enter")
             editor.press("Enter")
-            editor.type(f"@{mentions[0]}", delay=random.randint(35, 80))
+            if not self._place_topic_cursor_at_end(page, editor, cancel_event):
+                return
+            self._insert_topic_text(page, editor, f"@{mentions[0]}")
             self._record_human_action(page, cancel_event)
             self._human_pause(page, 0.4, 0.7, cancel_event)
             self._opened_mention = mentions[0]

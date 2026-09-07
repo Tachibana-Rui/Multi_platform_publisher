@@ -352,6 +352,15 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
 .platform-assets-heading strong { margin-bottom: 4px; font-size: 12px; }
 .platform-assets-heading small { color: #969b94; font-size: 10px; }
 .platform-assets-heading > span { color: #898f88; font-size: 10px; }
+.landscape-split-actions { display: grid; gap: 7px; margin-bottom: 14px; }
+.landscape-split-actions .secondary-button { padding: 10px; }
+.landscape-split-actions small, .upload-order-preview > small { color: #727b73; font-size: 10px; line-height: 1.6; }
+.upload-order-preview { margin-bottom: 15px; }
+.upload-order-strip { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 7px 0; }
+.upload-order-card { flex: 0 0 120px; margin: 0; scroll-snap-align: start; }
+.upload-order-card button { display: block; width: 100%; padding: 0; border: 1px solid #dedfd9; border-radius: 8px; overflow: hidden; background: white; cursor: zoom-in; }
+.upload-order-card img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: contain; }
+.upload-order-card figcaption { margin-top: 4px; font-size: 10px; color: #5c655d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .platform-assets-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .selectable-asset { position: relative; overflow: hidden; aspect-ratio: 1; border: 2px solid transparent; border-radius: 10px; background: #dfe3de; cursor: pointer; transition: .15s ease; }
 .selectable-asset img, .selectable-asset video { width: 100%; height: 100%; object-fit: cover; }
@@ -565,8 +574,10 @@ h1 { margin-bottom: 0; font-family: Georgia, "Songti SC", serif; font-size: clam
   .root-section { overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
   .library-search-section { overflow: visible; }
   .library-filters { grid-template-columns: 1fr 1fr; }
-  .platform-body { max-height: calc(100vh - 170px); grid-template-columns: 1fr; overflow-y: auto; }
-  .platform-copy-editor, .platform-assets-panel, .platform-fields-scroll { overflow: visible; }
+  .platform-body { display: block; max-height: calc(100vh - 170px); overflow-y: auto; }
+  .platform-copy-editor { display: block; }
+  .platform-copy-editor, .platform-assets-panel, .platform-fields-scroll { min-width: 0; overflow: visible; }
+  .adapter-toolbar, .platform-modal .generation-row, .platform-modal .footer-actions { flex-wrap: wrap; }
   .platform-fields-scroll { padding: 20px 20px 12px; }
   .generation-row { padding: 13px 20px 16px; }
   .generation-options { gap: 8px; }
